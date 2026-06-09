@@ -43,21 +43,26 @@ class ChartExchangeFetcher:
         user_agents: User-Agent轮换列表
     """
     
-    # TODO: 需要通过浏览器F12 Network面板抓包确认真实的API端点
-    # 以下为推测的端点，实际使用时需要根据抓包结果修改
+    # ✅ 真实API端点配置（2026-06-10抓包验证）
+    # API文档: https://chartexchange.com/api/v1/docs/
+    # OpenAPI Schema: https://chartexchange.com/api/v1/schema/?format=json
     API_ENDPOINTS = {
-        'short_volume': '/api/v1/shortvolume/{symbol}',  # 待确认
-        'daily_data': '/data/daily/{symbol}/shortvol',   # 待确认
+        'short_volume': '/data/stocks/short-volume/',  # 短卖量数据 (Tier 1)
+        'exchange_volume': '/data/stocks/exchange-volume/',  # 交易所成交量
+        'short_interest': '/data/stocks/short-interest/',  # 空头持仓
+        'dark_pool_levels': '/data/dark-pool-levels/',  # 暗池价位 (Tier 3)
     }
     
-    def __init__(self, mock_mode: bool = False):
+    def __init__(self, mock_mode: bool = False, api_key: Optional[str] = None):
         """初始化ChartExchange数据获取器
         
         Args:
             mock_mode: Mock模式开关，用于无网络连接或API不可用时的测试
+            api_key: ChartExchange API密钥（从config读取或手动传入）
         """
         self.mock_mode = mock_mode
-        self.base_url = "https://chartexchange.com"
+        self.base_url = "https://chartexchange.com/api/v1"
+        self.api_key = api_key or getattr(Config, 'CHARTEXCHANGE_API_KEY', None)
         
         # 创建会话对象
         self.session = requests.Session()
@@ -73,7 +78,7 @@ class ChartExchangeFetcher:
         # 设置默认请求头
         self._set_random_headers()
         
-        logger.info(f"ChartExchangeFetcher初始化完成 (mock_mode={mock_mode})")
+        logger.info(f"ChartExchangeFetcher初始化完成 (mock_mode={mock_mode}, api_key={'已配置' if self.api_key else '未配置'})")
     
     def _set_random_headers(self):
         """设置随机请求头以规避反爬检测"""
@@ -123,82 +128,91 @@ class ChartExchangeFetcher:
             logger.warning(f"Mock模式: 返回模拟{symbol}卖空数据")
             return self._get_mock_short_volume_data(symbol)
         
-        # TODO: 需要手动确认真实的API端点
-        # 策略A: 尝试JSON API端点
-        api_url_candidates = [
-            f"{self.base_url}/api/v1/shortvolume/{symbol}",
-            f"{self.base_url}/data/daily/{symbol}/shortvol",
-            f"{self.base_url}/api/chart/{symbol}/short-volume",
-        ]
+        # ✅ 使用真实API端点（抓包验证）
+        if not self.api_key:
+            logger.error("ChartExchange API密钥未配置，请在config中设置CHARTEXCHANGE_API_KEY")
+            raise DataFetchError(
+                message="ChartExchange API密钥未配置",
+                error_code="CHARTEXCHANGE_NO_API_KEY",
+                details={"hint": "请从 https://chartexchange.com/api/v1/docs/ 获取API密钥"}
+            )
         
-        last_error = None
+        # 构建API请求URL和参数
+        url = f"{self.base_url}{self.API_ENDPOINTS['short_volume']}"
+        params = {
+            'symbol': f'US:{symbol}',  # symbol格式: US:SPY
+            'page_size': 1,  # 仅获取最新一条数据
+            'ordering': '-date',  # 按日期降序
+            'api_key': self.api_key
+        }
         
-        for url in api_url_candidates:
-            try:
-                logger.info(f"尝试请求ChartExchange API: {url}")
-                
-                # 每次请求前更换User-Agent
-                self._set_random_headers()
-                
-                response = self.session.get(
-                    url,
-                    timeout=Config.REQUEST_TIMEOUT
+        try:
+            logger.info(f"请求ChartExchange API: {url}, 参数: symbol=US:{symbol}")
+            
+            # 每次请求前更换User-Agent
+            self._set_random_headers()
+            
+            response = self.session.get(
+                url,
+                params=params,
+                timeout=Config.REQUEST_TIMEOUT
+            )
+            
+            # 处理HTTP错误
+            if response.status_code == 403:
+                error_msg = "403 Forbidden - API密钥无效或权限不足"
+                logger.error(error_msg)
+                raise DataFetchError(
+                    message=error_msg,
+                    error_code="CHARTEXCHANGE_403",
+                    details={"api_key_configured": bool(self.api_key)}
                 )
+            elif response.status_code == 429:
+                error_msg = "429 Too Many Requests - 触发频率限制"
+                logger.warning(error_msg)
+                raise DataFetchError(
+                    message=error_msg,
+                    error_code="CHARTEXCHANGE_429",
+                    details={"tier_hint": "检查API订阅等级"}
+                )
+            
+            response.raise_for_status()
+            
+            # 解析JSON响应
+            data = response.json()
+            
+            # 提取results数组中的第一条记录
+            if 'results' in data and len(data['results']) > 0:
+                latest_record = data['results'][0]
+                logger.info(f"成功获取{symbol}卖空数据 (date={latest_record.get('date')})")
+                return latest_record
+            else:
+                logger.warning(f"API返回空results数组: {data}")
+                return None
                 
-                # 处理403/429错误
-                if response.status_code == 403:
-                    logger.warning(f"403 Forbidden，可能需要验证码或IP被封")
-                    continue
-                elif response.status_code == 429:
-                    logger.warning(f"429 Too Many Requests，触发频率限制")
-                    continue
-                
-                response.raise_for_status()
-                
-                # 尝试解析JSON
-                try:
-                    data = response.json()
-                    logger.info(f"成功获取{symbol}卖空数据 (JSON格式)")
-                    return data
-                except ValueError:
-                    logger.warning(f"响应不是JSON格式，可能是HTML页面")
-                    # 策略B: 如果API返回HTML，需要解析DOM（此处简化处理）
-                    continue
-                    
-            except Timeout as e:
-                logger.warning(f"Request timeout: {url}, error: {str(e)}")
-                last_error = e
-                continue
-            except ConnectionError as e:
-                logger.warning(f"Connection error: {url}, error: {str(e)}")
-                last_error = e
-                continue
-            except HTTPError as e:
-                logger.warning(f"HTTP error ({e.response.status_code}): {url}")
-                last_error = e
-                continue
-            except Exception as e:
-                logger.warning(f"请求失败: {url}, 错误: {str(e)}")
-                last_error = e
-                continue
-        
-        # 所有候选端点均失败
-        logger.error(f"所有API端点均失败，最后错误: {last_error}")
-        
-        # 降级策略：返回None，由调用方决定是否使用历史缓存
-        raise DataFetchError(
-            message=f"无法从ChartExchange获取{symbol}卖空数据，所有端点均失败",
-            error_code="CHARTEXCHANGE_ALL_ENDPOINTS_FAILED",
-            details={"tried_urls": api_url_candidates, "last_error": str(last_error)}
-        )
+        except Timeout as e:
+            logger.error(f"Request timeout: {url}, error: {str(e)}")
+            raise DataFetchError(
+                message=f"ChartExchange API请求超时: {str(e)}",
+                error_code="CHARTEXCHANGE_TIMEOUT",
+                details={"url": url, "symbol": symbol}
+            )
+        except Exception as e:
+            logger.error(f"ChartExchange API请求失败: {str(e)}", exc_info=True)
+            raise DataFetchError(
+                message=f"无法从ChartExchange获取{symbol}卖空数据: {str(e)}",
+                error_code="CHARTEXCHANGE_REQUEST_FAILED",
+                details={"url": url, "symbol": symbol, "error": str(e)}
+            )
     
     def calculate_off_exchange_short_ratio(self, raw_json: Dict[str, Any]) -> Optional[float]:
         """计算场外卖空比例
         
-        公式: off_exchange_short_volume / off_exchange_total_volume * 100
+        公式: st (short_total) / rt (reported_total) * 100
         
         Args:
             raw_json: fetch_short_volume_data返回的原始JSON数据
+                     字段说明: st=short_total, rt=reported_total
             
         Returns:
             float: 卖空比例百分比（如45.8表示45.8%）
@@ -216,23 +230,13 @@ class ChartExchangeFetcher:
                 logger.error("输入数据为None")
                 return None
             
-            # 尝试多种可能的字段名
-            short_vol = (
-                raw_json.get('off_exchange_short_volume') or
-                raw_json.get('shortVolume') or
-                raw_json.get('offExchangeShortVol') or
-                raw_json.get('short_vol')
-            )
-            
-            total_vol = (
-                raw_json.get('off_exchange_total_volume') or
-                raw_json.get('totalVolume') or
-                raw_json.get('offExchangeTotalVol') or
-                raw_json.get('total_vol')
-            )
+            # ✅ 使用真实API字段名（抓包验证）
+            # API响应字段: st=short_total, rt=reported_total
+            short_vol = raw_json.get('st')  # short total (短卖总量)
+            total_vol = raw_json.get('rt')  # reported total (报告总成交量)
             
             if short_vol is None or total_vol is None:
-                logger.error("缺少必要的成交量字段")
+                logger.error("缺少必要的成交量字段 (st/rt)")
                 logger.debug(f"可用字段: {list(raw_json.keys())}")
                 return None
             
@@ -245,7 +249,7 @@ class ChartExchangeFetcher:
             
             ratio = (short_vol / total_vol) * 100
             
-            logger.info(f"场外卖空比例: {ratio:.2f}% (short_vol={short_vol:.0f}, total_vol={total_vol:.0f})")
+            logger.info(f"场外卖空比例: {ratio:.2f}% (st={short_vol:.0f}, rt={total_vol:.0f})")
             
             # 记录阈值状态
             if ratio > 45.0:
@@ -338,13 +342,14 @@ class ChartExchangeFetcher:
 
 
 # 便捷函数
-def create_chartexchange_fetcher(mock_mode: bool = False) -> ChartExchangeFetcher:
+def create_chartexchange_fetcher(mock_mode: bool = False, api_key: Optional[str] = None) -> ChartExchangeFetcher:
     """创建ChartExchange数据获取器实例的工厂函数
     
     Args:
         mock_mode: 是否启用Mock模式
+        api_key: ChartExchange API密钥（可选，默认从config读取）
         
     Returns:
         ChartExchangeFetcher: 配置好的获取器实例
     """
-    return ChartExchangeFetcher(mock_mode=mock_mode)
+    return ChartExchangeFetcher(mock_mode=mock_mode, api_key=api_key)

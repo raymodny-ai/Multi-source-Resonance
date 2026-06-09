@@ -48,6 +48,7 @@ from signal_engine import (
     SignalStateMachine,
     format_alert_message
 )
+from notification import AlertSender
 from utils.fallback_manager import FallbackManager, handle_fetch_errors
 
 logger = getLogger('main_scheduler')
@@ -81,7 +82,7 @@ class MainScheduler:
         self.yahoo_fetcher = YahooFinanceFetcher()
         self.ccxt_fetcher = CCXTFetcher()
         self.squeezemetrics_fetcher = SqueezeMetricsFetcher()
-        self.chartexchange_fetcher = ChartExchangeFetcher()
+        self.chartexchange_fetcher = ChartExchangeFetcher()  # API密钥从config自动读取
         self.stockgrid_fetcher = StockgridFetcher()
         self.dbmf_fetcher = DBMFFetcher()
         
@@ -92,6 +93,9 @@ class MainScheduler:
         self.darkpool_verifier = DarkPoolVerifier()
         self.resonance_scorer = ResonanceScorer()
         self.signal_machine = SignalStateMachine(cooldown_minutes=30)
+        
+        # 初始化告警发送器
+        self.alert_sender = AlertSender()
         
         # 初始化降级管理器
         self.fallback_manager = FallbackManager()
@@ -605,14 +609,21 @@ class MainScheduler:
                 )
             )
                 
+            # 检查数据源可用性（PRD第6节降级逻辑）
+            available_sources = await loop.run_in_executor(
+                self.executor,
+                self._check_data_source_availability
+            )
+            
+            # 使用支持降级逻辑的暗盘评分方法
             darkpool_score = await loop.run_in_executor(
                 self.executor,
-                lambda: self.resonance_scorer.calculate_darkpool_score(
+                lambda: self.resonance_scorer.calculate_darkpool_score_with_fallback(
                     dix_flag=latest_darkpool.get('dix_signal', False) if latest_darkpool else False,
                     short_ratio_flag=latest_darkpool.get('short_ratio_signal', False) if latest_darkpool else False,
                     stockgrid_flag=latest_darkpool.get('stockgrid_signal', False) if latest_darkpool else False,
                     dbmf_recovery=latest_darkpool.get('dbmf_ma5_recovery', False) if latest_darkpool else False,
-                    aggregated_signal=latest_darkpool.get('aggregated_signal', False) if latest_darkpool else False
+                    available_sources=available_sources
                 )
             )
                 
@@ -646,13 +657,15 @@ class MainScheduler:
             )
                 
             if trigger_result['should_alert']:
-                # 格式化告警消息
+                # 格式化LEVEL 3告警消息（使用alert_sender的格式化方法）
                 alert_message = await loop.run_in_executor(
                     self.executor,
-                    format_alert_message,
-                    resonance_result,
-                    hawkes_result,
-                    current_time
+                    lambda: self.alert_sender.format_level3_alert(
+                        resonance_result=resonance_result,
+                        hawkes_result=hawkes_result,
+                        current_time=current_time,
+                        put_wall_range=None  # TODO: 从GEX数据获取Put Wall区间
+                    )
                 )
                     
                 # 存入数据库
@@ -670,9 +683,26 @@ class MainScheduler:
                     resonance_result
                 )
                     
-                # 发送通知(待实现notification模块)
+                # 多渠道发送告警（邮件 + Telegram）
                 logger.warning(f"🚨 {resonance_result['alert_level']} 信号触发! 总分: {resonance_result['total_score']}")
-                logger.info(f"告警详情: {alert_message[:200]}...")
+                
+                channels_to_use = ['email', 'telegram'] if resonance_result['alert_level'] == 'LEVEL_3' else ['email']
+                
+                send_results = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.alert_sender.send_multi_channel_alert(
+                        subject=f"[{resonance_result['alert_level']}] 共振抄底信号触发",
+                        message=alert_message,
+                        channels=channels_to_use
+                    )
+                )
+                
+                # 记录发送结果
+                success_count = sum(1 for v in send_results.values() if v)
+                logger.info(
+                    f"告警发送完成: {success_count}/{len(channels_to_use)} 成功 "
+                    f"(结果: {send_results})"
+                )
             else:
                 logger.debug(
                     f"共振评估完成: {resonance_result['total_score']}/{resonance_result['max_score']}, "
@@ -893,6 +923,83 @@ class MainScheduler:
             
         except Exception as e:
             logger.error(f"数据库备份任务失败: {e}", exc_info=True)
+    
+    def _check_data_source_availability(self) -> Dict[str, bool]:
+        """检查各暗盘数据源的可用性状态
+        
+        通过查询数据库最新记录时间戳判断数据源是否可用。
+        用于PRD第6节降级逻辑：当某数据源失败时自动放弃该校验。
+        
+        Returns:
+            dict: 各数据源可用性标记
+                  {'dix': True/False, 'short_ratio': True/False, 'stockgrid': True/False}
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            
+            # 获取最新暗盘指标记录
+            latest_darkpool = loop.run_until_complete(
+                loop.run_in_executor(
+                    self.db_executor,
+                    self.db.get_latest_dark_pool_metrics
+                )
+            )
+            
+            if not latest_darkpool:
+                logger.warning("无暗盘数据记录，默认所有源不可用")
+                availability = {
+                    'dix': False,
+                    'short_ratio': False,
+                    'stockgrid': False
+                }
+            else:
+                # 检查各字段是否有有效值（非None且非False）
+                dix_available = latest_darkpool.get('dix_value') is not None and latest_darkpool.get('dix_signal', False)
+                short_ratio_available = latest_darkpool.get('short_ratio') is not None and latest_darkpool.get('short_ratio_signal', False)
+                stockgrid_available = latest_darkpool.get('slope_20d') is not None and latest_darkpool.get('stockgrid_signal', False)
+                
+                availability = {
+                    'dix': dix_available,
+                    'short_ratio': short_ratio_available,
+                    'stockgrid': stockgrid_available
+                }
+            
+            # ✅ PRD第6节要求：检查是否触发极端退化模式，发送CRITICAL告警
+            total_available = sum(1 for v in availability.values() if v)
+            if total_available == 0:
+                critical_msg = (
+                    "[CRITICAL] 场外暗盘所有爬虫接口触发改版异常，"
+                    "已退化为纯本地实时衍生品计算流模式，请及时排查前端结构。"
+                )
+                logger.critical(critical_msg)
+                
+                # 尝试发送CRITICAL告警到所有渠道
+                try:
+                    loop.run_until_complete(
+                        loop.run_in_executor(
+                            self.executor,
+                            lambda: self.alert_sender.send_multi_channel_alert(
+                                subject="[CRITICAL] 暗盘数据源全部失效",
+                                message=critical_msg,
+                                channels=['email', 'telegram', 'discord']
+                            )
+                        )
+                    )
+                    logger.info("CRITICAL告警已发送到所有渠道")
+                except Exception as alert_err:
+                    logger.critical(f"CRITICAL告警发送失败: {alert_err}")
+            
+            logger.debug(f"数据源可用性检查完成: {availability}")
+            return availability
+            
+        except Exception as e:
+            logger.error(f"数据源可用性检查失败: {e}", exc_info=True)
+            # 异常时保守假设全部可用（保持原有行为）
+            return {
+                'dix': True,
+                'short_ratio': True,
+                'stockgrid': True
+            }
     
     def _get_next_friday_expiry(self, current_date: datetime) -> str:
         """获取下一个周五期权到期日

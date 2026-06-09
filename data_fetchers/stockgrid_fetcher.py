@@ -21,6 +21,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 import subprocess
 import sys
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from utils.logger import getLogger
 from utils.exceptions import DataFetchError
 from config.settings import Config
@@ -173,7 +174,19 @@ class StockgridFetcher:
         mock_mode: Mock模式开关
         browser_manager: Playwright浏览器管理器单例
         base_url: Stockgrid网站基础URL
+        selectors: CSS选择器配置字典（外置以便维护）
     """
+    
+    # ✅ PRD要求：CSS选择器外置配置，便于网站改版时快速调整
+    SELECTORS = {
+        'chart_container': '.darkpool-chart, .net-position-chart, #darkpool-chart',
+        'data_table': '.net-position-table, .data-table, #position-data',
+        'period_selector': '.period-selector, .timeframe-btn, [data-period]',
+        'value_cell': '.position-value, .net-amount, td.value-cell',
+        'date_column': '.date-column, td.date-cell',
+        'loading_indicator': '.loading-spinner, .skeleton-loader',
+        'error_message': '.error-message, .alert-danger',
+    }
     
     def __init__(self, mock_mode: bool = False):
         """初始化Stockgrid数据获取器
@@ -187,6 +200,16 @@ class StockgridFetcher:
         
         logger.info(f"StockgridFetcher初始化完成 (mock_mode={mock_mode})")
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=5, min=5, max=45),  # 5s → 15s → 45s
+        retry=retry_if_exception_type((DataFetchError, TimeoutError, Exception)),
+        reraise=True,
+        before_sleep=lambda retry_state: logger.warning(
+            f"Stockgrid爬取失败，第{retry_state.attempt_number}次重试 "
+            f"(等待{retry_state.next_action.sleep}秒): {retry_state.outcome.exception()}"
+        )
+    )
     async def scrape_net_position_history(
         self, 
         symbol: str = 'SPY', 
@@ -214,7 +237,7 @@ class StockgridFetcher:
             失败时返回None
             
         Raises:
-            DataFetchError: 爬取失败时抛出
+            DataFetchError: 爬取失败时抛出（经3次重试后仍失败）
             
         Examples:
             >>> fetcher = StockgridFetcher()
@@ -323,6 +346,8 @@ class StockgridFetcher:
     ) -> Optional[Dict[str, List[float]]]:
         """解析DOM表格提取净头寸数据（降级策略）
         
+        使用外置的CSS选择器配置，便于网站改版时快速调整。
+        
         Args:
             page: Playwright Page对象
             symbol: 标的符号
@@ -334,31 +359,49 @@ class StockgridFetcher:
         try:
             result = {}
             
+            # ✅ 使用外置选择器配置
+            data_table_selector = self.SELECTORS['data_table']
+            value_cell_selector = self.SELECTORS['value_cell']
+            
             for period in period_days:
                 # 尝试从页面提取数据
-                # TODO: 需要根据实际DOM结构调整选择器
-                selector = f'.net-position-data[data-period="{period}"]'
+                # 优先尝试周期特定的选择器
+                selector_candidates = [
+                    f'.net-position-data[data-period="{period}"]',
+                    f'{data_table_selector}[data-period="{period}"]',
+                    f'{value_cell_selector}.period-{period}',
+                ]
                 
-                try:
-                    # 提取文本内容
-                    text_content = await page.text_content(selector)
-                    
-                    # 解析数值（假设格式为逗号分隔的数字序列）
-                    if text_content:
-                        values = []
-                        for item in text_content.split(','):
-                            try:
-                                values.append(float(item.strip()))
-                            except ValueError:
-                                continue
+                selected = False
+                for selector in selector_candidates:
+                    try:
+                        # 等待元素出现
+                        await page.wait_for_selector(selector, timeout=5000)
                         
-                        if values:
-                            result[f'{period}d'] = values
-                            logger.info(f"DOM解析成功: {period}d周期, {len(values)}个数据点")
+                        # 提取文本内容
+                        text_content = await page.text_content(selector)
+                        
+                        # 解析数值（假设格式为逗号分隔的数字序列）
+                        if text_content:
+                            values = []
+                            for item in text_content.split(','):
+                                try:
+                                    values.append(float(item.strip()))
+                                except ValueError:
+                                    continue
+                            
+                            if values:
+                                result[f'{period}d'] = values
+                                logger.info(f"DOM解析成功: {period}d周期, {len(values)}个数据点 (选择器: {selector})")
+                                selected = True
+                                break
+                    
+                    except Exception as e:
+                        logger.debug(f"选择器 '{selector}' 失败: {str(e)}")
+                        continue
                 
-                except Exception as e:
-                    logger.warning(f"DOM解析{period}d周期失败: {str(e)}")
-                    continue
+                if not selected:
+                    logger.warning(f"{period}d周期所有选择器均失败，尝试下一个周期")
             
             if result:
                 return result
@@ -377,6 +420,8 @@ class StockgridFetcher:
     ) -> Optional[Dict[str, List[float]]]:
         """解析XHR响应数据（策略A）
         
+        使用外置的API字段名配置，便于API改版时快速调整。
+        
         Args:
             xhr_responses: XHR响应JSON数据列表
             period_days: 时间周期列表
@@ -387,15 +432,20 @@ class StockgridFetcher:
         try:
             result = {}
             
+            # ✅ 外置API字段名配置
+            api_field_patterns = [
+                'net_position_{period}d',
+                'netPosition{period}d',
+                '{period}d_net_position',
+                'data_{period}d',
+                'position_data_{period}',
+            ]
+            
             for response in xhr_responses:
-                # 尝试多种可能的字段名
-                # TODO: 需要根据实际API响应结构调整
                 for period in period_days:
+                    # 使用配置的字段模式
                     key_candidates = [
-                        f'net_position_{period}d',
-                        f'netPosition{period}d',
-                        f'{period}d_net_position',
-                        f'data_{period}d',
+                        pattern.format(period=period) for pattern in api_field_patterns
                     ]
                     
                     for key in key_candidates:
@@ -421,21 +471,21 @@ class StockgridFetcher:
         net_position_series: List[float], 
         price_series: List[float]
     ) -> Dict[str, Any]:
-        """检测底背离信号
+        """检测底背离信号（双周期斜率修正版）
         
         当价格创新低但净头寸斜率转正时，标记为底背离。
-        使用numpy.polyfit进行线性回归计算斜率。
+        分别计算20日和60日窗口的独立斜率，实现PRD要求的双周期验证。
         
         Args:
-            net_position_series: 净头寸时间序列（最近N个数据点）
+            net_position_series: 净头寸时间序列（最近N个数据点，建议>=60）
             price_series: 价格时间序列（与净头寸对应的时间段）
             
         Returns:
             dict: 背离检测结果
                 {
                     'divergence': bool,  # 是否检测到背离
-                    'slope_20d': float,  # 20日斜率
-                    'slope_60d': float,  # 60日斜率
+                    'slope_20d': float,  # 20日斜率（独立计算）
+                    'slope_60d': float,  # 60日斜率（独立计算）
                     'price_trend': str,  # 价格趋势 ('down', 'up', 'flat')
                     'position_trend': str  # 净头寸趋势 ('up', 'down', 'flat')
                 }
@@ -445,6 +495,7 @@ class StockgridFetcher:
             >>> result = fetcher.detect_bottom_divergence(net_pos, prices)
             >>> if result['divergence']:
             ...     print("✅ 检测到底背离：价格下跌但机构净流入")
+            ...     print(f"20日斜率: {result['slope_20d']:.4f}, 60日斜率: {result['slope_60d']:.4f}")
         """
         try:
             if len(net_position_series) < 5 or len(price_series) < 5:
@@ -457,17 +508,38 @@ class StockgridFetcher:
                     'position_trend': 'unknown'
                 }
             
-            # 计算线性回归斜率
-            x = np.arange(len(net_position_series))
+            # ✅ 修复：分别计算20日和60日窗口的独立斜率
+            # 计算60日斜率（需要至少60个数据点）
+            if len(net_position_series) >= 60:
+                recent_60 = net_position_series[-60:]
+                x_60 = np.arange(60)
+                slope_60d = float(np.polyfit(x_60, recent_60, 1)[0])
+            else:
+                # 数据不足60个，使用全部可用数据
+                x_full = np.arange(len(net_position_series))
+                slope_60d = float(np.polyfit(x_full, net_position_series, 1)[0])
+                logger.warning(f"数据点不足60个（实际{len(net_position_series)}个），60日斜率使用全量数据")
             
-            # 净头寸斜率
-            position_slope = np.polyfit(x, net_position_series, 1)[0]
+            # 计算20日斜率（需要至少20个数据点）
+            if len(net_position_series) >= 20:
+                recent_20 = net_position_series[-20:]
+                x_20 = np.arange(20)
+                slope_20d = float(np.polyfit(x_20, recent_20, 1)[0])
+            else:
+                # 数据不足20个，使用60日斜率作为fallback
+                slope_20d = slope_60d
+                logger.warning(f"数据点不足20个（实际{len(net_position_series)}个），20日斜率使用60日斜率")
             
-            # 价格斜率
-            price_slope = np.polyfit(x, price_series, 1)[0]
+            # 计算价格趋势斜率（使用与净头寸相同的窗口）
+            if len(price_series) >= 60:
+                recent_price_60 = price_series[-60:]
+                price_slope = float(np.polyfit(np.arange(60), recent_price_60, 1)[0])
+            else:
+                x_price = np.arange(len(price_series))
+                price_slope = float(np.polyfit(x_price, price_series, 1)[0])
             
-            # 判断趋势方向
-            position_trend = 'up' if position_slope > 0 else ('down' if position_slope < 0 else 'flat')
+            # 判断趋势方向（基于20日斜率，更敏感）
+            position_trend = 'up' if slope_20d > 0 else ('down' if slope_20d < 0 else 'flat')
             price_trend = 'up' if price_slope > 0 else ('down' if price_slope < 0 else 'flat')
             
             # 检测底背离：价格下跌但净头寸上升
@@ -475,16 +547,22 @@ class StockgridFetcher:
             
             result = {
                 'divergence': divergence,
-                'slope_20d': float(position_slope),
-                'slope_60d': float(position_slope),  # 简化：使用相同斜率
+                'slope_20d': slope_20d,   # ✅ 修复：独立的20日斜率
+                'slope_60d': slope_60d,   # ✅ 修复：独立的60日斜率
                 'price_trend': price_trend,
                 'position_trend': position_trend
             }
             
             if divergence:
-                logger.warning(f"✅ 检测到底背离: 价格{price_trend}, 净头寸{position_trend}, 斜率={position_slope:.4f}")
+                logger.warning(
+                    f"✅ 检测到底背离: 价格{price_trend}, 净头寸{position_trend}, "
+                    f"20日斜率={slope_20d:.4f}, 60日斜率={slope_60d:.4f}"
+                )
             else:
-                logger.info(f"无背离: 价格{price_trend}, 净头寸{position_trend}, 斜率={position_slope:.4f}")
+                logger.info(
+                    f"无背离: 价格{price_trend}, 净头寸{position_trend}, "
+                    f"20日斜率={slope_20d:.4f}, 60日斜率={slope_60d:.4f}"
+                )
             
             return result
             

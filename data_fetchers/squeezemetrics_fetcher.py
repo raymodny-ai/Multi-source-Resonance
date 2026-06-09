@@ -1,21 +1,23 @@
 """
 多源共振监控系统 - SqueezeMetrics DIX数据获取器
 
-该模块负责从SqueezeMetrics API获取暗盘活动指标(DIX)和Gamma风险暴露(GEX)数据。
+该模块负责从SqueezeMetrics官网获取暗盘活动指标(DIX)和Gamma风险暴露(GEX)数据。
 DIX是衡量机构在暗盘买入强度的关键指标，GEX反映做市商对冲压力。
 
 主要功能:
-- 每日收盘后获取DIX百分比值
+- 每日收盘后通过CSV直接下载获取DIX百分比值（无需API密钥）
 - 获取Barchart Put Wall直方图数据
 - 提供Mock模式用于测试
 
-API文档: https://squeezemetrics.com/monitor
+数据源: https://squeezemetrics.com/monitor/static/DIX.csv
 频率: 每日美东时间16:00后执行
 """
 
 import requests
 from requests.exceptions import Timeout, ConnectionError, HTTPError
 from typing import Optional, Dict, Any
+from io import StringIO
+import csv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from utils.logger import getLogger
 from utils.exceptions import DataFetchError
@@ -27,27 +29,31 @@ logger = getLogger('squeezemetrics_fetcher')
 class SqueezeMetricsFetcher:
     """SqueezeMetrics暗盘指标获取器
     
-    通过SqueezeMetrics API获取官方DIX（Dark Index）和GEX（Gamma Exposure）指标。
+    通过SqueezeMetrics官方CSV文件直接下载获取DIX（Dark Index）指标。
     DIX > 45% 表示机构在暗盘大量买入，是重要的左侧抄底信号。
     
+    优势:
+    - 无需API密钥，完全免费
+    - CSV格式稳定，不受JavaScript渲染影响
+    - 轻量级请求，响应速度快
+    
     Attributes:
-        api_key: SqueezeMetrics API密钥
-        base_url: API基础URL
         mock_mode: Mock模式开关
+        dix_csv_url: DIX数据CSV下载地址
     """
     
-    def __init__(self, api_key: Optional[str] = None, mock_mode: bool = False):
+    # SqueezeMetrics官方公开的CSV下载地址（无需认证）
+    DIX_CSV_URL = 'https://squeezemetrics.com/monitor/static/DIX.csv'
+    
+    def __init__(self, mock_mode: bool = False):
         """初始化SqueezeMetrics数据获取器
         
         Args:
-            api_key: SqueezeMetrics API密钥，默认从Config读取
-            mock_mode: Mock模式开关，用于无API密钥时的测试
+            mock_mode: Mock模式开关，用于无网络连接时的测试
         """
-        self.api_key = api_key or Config.SQUEEZEMETRICS_API_KEY
-        self.base_url = Config.SQUEEZEMETRICS_BASE_URL
         self.mock_mode = mock_mode
         
-        logger.info(f"SqueezeMetricsFetcher初始化完成 (mock_mode={mock_mode})")
+        logger.info(f"SqueezeMetricsFetcher初始化完成 (mock_mode={mock_mode}, CSV下载模式)")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -56,17 +62,20 @@ class SqueezeMetricsFetcher:
         reraise=True
     )
     def get_daily_dix(self) -> Optional[float]:
-        """获取每日DIX指标值
+        """获取每日DIX指标值（通过CSV直接下载）
         
-        从SqueezeMetrics API获取最新的DIX（Dark Index）百分比值。
+        从SqueezeMetrics官方CSV文件获取最新的DIX（Dark Index）百分比值。
         DIX衡量暗盘交易量占总交易量的比例，高DIX值表明机构在隐蔽建仓。
+        
+        CSV格式: Date,DIX (例如: 2026-06-08,47.2)
+        数据按日期排序，最后一行为最新数据。
         
         Returns:
             float: DIX百分比值（如45.8表示45.8%）
                   失败时返回None
             
         Raises:
-            DataFetchError: API请求失败时抛出
+            DataFetchError: CSV下载或解析失败时抛出
             
         Examples:
             >>> fetcher = SqueezeMetricsFetcher()
@@ -80,57 +89,94 @@ class SqueezeMetricsFetcher:
             logger.warning("Mock模式: 返回模拟DIX值")
             return self._get_mock_dix()
         
-        # TODO: 需通过实际API文档确认准确的端点和参数
-        # 以下为推测的API端点，需要根据实际情况调整
-        url = f"{self.base_url}/monitor/dix"
-        params = {
-            'key': self.api_key,
-            'format': 'json'
-        }
-        
         try:
-            logger.info("请求SqueezeMetrics API获取DIX指标")
+            logger.info(f"请求SqueezeMetrics CSV: {self.DIX_CSV_URL}")
+            
+            # 设置请求头伪装为浏览器
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/csv,application/csv,*/*'
+            }
+            
             response = requests.get(
-                url,
-                params=params,
+                self.DIX_CSV_URL,
+                headers=headers,
                 timeout=Config.REQUEST_TIMEOUT
             )
             response.raise_for_status()
             
-            data = response.json()
-            
-            # 解析DIX值（具体字段名需根据实际API响应调整）
-            dix_value = data.get('dix') or data.get('DIX') or data.get('value')
-            
-            if dix_value is None:
-                logger.error("API响应中缺少DIX字段")
-                logger.debug(f"完整响应: {data}")
+            # 解析CSV内容
+            csv_content = response.text.strip()
+            if not csv_content:
+                logger.error("CSV文件为空")
                 return None
             
-            dix_float = float(dix_value)
-            logger.debug(f"成功获取DIX指标: {dix_float:.2f}%")
+            csv_reader = csv.reader(StringIO(csv_content))
+            
+            # 跳过表头（如果有）
+            first_row = next(csv_reader, None)
+            if not first_row:
+                logger.error("CSV文件无数据行")
+                return None
+            
+            # 检查第一行是否为表头
+            if first_row[0].lower() == 'date' or first_row[0].lower() == 'dix':
+                # 是表头，读取第二行
+                latest_row = next(csv_reader, None)
+            else:
+                # 不是表头，第一行就是数据
+                latest_row = first_row
+            
+            if not latest_row or len(latest_row) < 2:
+                logger.error(f"CSV数据行格式错误: {latest_row}")
+                return None
+            
+            # 提取DIX值（第二列）
+            date_str = latest_row[0]
+            dix_str = latest_row[1].strip()
+            
+            try:
+                dix_value = float(dix_str)
+            except ValueError:
+                logger.error(f"DIX值无法转换为浮点数: '{dix_str}'")
+                return None
+            
+            logger.info(f"成功获取DIX指标: 日期={date_str}, DIX={dix_value:.2f}%")
             
             # 记录阈值状态
-            if dix_float > 45.0:
-                logger.warning(f"⚠️ DIX={dix_float:.2f}% 超过阈值45%，机构暗盘吸筹信号")
+            if dix_value > 45.0:
+                logger.warning(f"⚠️ DIX={dix_value:.2f}% 超过阈值45%，机构暗盘吸筹信号")
             
-            return dix_float
+            return dix_value
             
         except Timeout as e:
-            logger.error(f"Request timeout for DIX: {e}")
-            return None
+            logger.error(f"CSV下载超时: {e}")
+            raise DataFetchError(
+                message=f"SqueezeMetrics CSV下载超时: {str(e)}",
+                error_code="SQUEEZEMETRICS_TIMEOUT",
+                details={"url": self.DIX_CSV_URL}
+            )
         except ConnectionError as e:
-            logger.error(f"Connection error for DIX: {e}")
-            return None
+            logger.error(f"CSV下载连接错误: {e}")
+            raise DataFetchError(
+                message=f"SqueezeMetrics CSV连接失败: {str(e)}",
+                error_code="SQUEEZEMETRICS_CONNECTION_ERROR",
+                details={"url": self.DIX_CSV_URL}
+            )
         except HTTPError as e:
-            logger.error(f"HTTP error {e.response.status_code} for DIX: {e}")
-            return None
-        except ValueError as e:
-            logger.error(f"JSON decode error for DIX: {e}")
-            return None
+            logger.error(f"CSV下载HTTP错误 {e.response.status_code}: {e}")
+            raise DataFetchError(
+                message=f"SqueezeMetrics CSV HTTP错误 {e.response.status_code}",
+                error_code="SQUEEZEMETRICS_HTTP_ERROR",
+                details={"url": self.DIX_CSV_URL, "status_code": e.response.status_code}
+            )
         except Exception as e:
-            logger.error(f"Unexpected error fetching DIX: {e}", exc_info=True)
-            return None
+            logger.error(f"CSV下载或解析异常: {e}", exc_info=True)
+            raise DataFetchError(
+                message=f"SqueezeMetrics CSV处理失败: {str(e)}",
+                error_code="SQUEEZEMETRICS_PARSE_ERROR",
+                details={"error": str(e)}
+            )
     
     @retry(
         stop=stop_after_attempt(3),
@@ -288,14 +334,13 @@ class SqueezeMetricsFetcher:
 
 
 # 便捷函数
-def create_squeezemetrics_fetcher(api_key: Optional[str] = None, mock_mode: bool = False) -> SqueezeMetricsFetcher:
+def create_squeezemetrics_fetcher(mock_mode: bool = False) -> SqueezeMetricsFetcher:
     """创建SqueezeMetrics数据获取器实例的工厂函数
     
     Args:
-        api_key: SqueezeMetrics API密钥
         mock_mode: 是否启用Mock模式
         
     Returns:
         SqueezeMetricsFetcher: 配置好的获取器实例
     """
-    return SqueezeMetricsFetcher(api_key=api_key, mock_mode=mock_mode)
+    return SqueezeMetricsFetcher(mock_mode=mock_mode)
