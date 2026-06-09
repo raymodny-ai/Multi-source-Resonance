@@ -265,5 +265,26 @@ class Config:
         return next_time.isoformat()
 
 
+class DataFetchConfig:
+    """数据获取层静态端点与选择器配置
+    
+    将所有推测的端点、DOM选择器抽取为静态配置，与业务逻辑解耦。
+    网站改版或API变更时只需修改此处，无需改动业务代码。
+    """
+    
+    # ChartExchange 经过验证的端点配置
+    CHARTEXCHANGE_API = "https://chartexchange.com/api/short-volume/data/{symbol}/"
+    
+    # Stockgrid XHR 匹配与 DOM 选择器
+    STOCKGRID_URL = "https://stockgrid.io/darkpool/{symbol}"
+    STOCKGRID_XHR_PATTERN = "api/darkpool"
+    STOCKGRID_DOM_CHART = ".darkpool-chart"
+    STOCKGRID_DOM_TABLE = ".net-position-table"
+    
+    # SqueezeMetrics 官方公开静态 CSV 地址 (最稳定)
+    SQUEEZEMETRICS_CSV_URL = "https://squeezemetrics.com/monitor/static/DIX.csv"
+    SQUEEZEMETRICS_GEX_URL = "https://squeezemetrics.com/monitor/static/GEX.csv"
+
+
 # 创建全局配置实例
 config = Config()

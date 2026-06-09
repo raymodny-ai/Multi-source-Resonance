@@ -24,7 +24,7 @@ import sys
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from utils.logger import getLogger
 from utils.exceptions import DataFetchError
-from config.settings import Config
+from config.settings import Config, DataFetchConfig
 
 logger = getLogger('stockgrid_fetcher')
 
@@ -274,12 +274,11 @@ class StockgridFetcher:
             # 存储XHR响应数据
             xhr_responses = []
             
-            # 策略A: 拦截XHR请求
+            # 策略A: 拦截XHR请求（使用外置配置的URL匹配规则）
             async def handle_response(response):
                 try:
                     url = response.url
-                    # TODO: 需要根据实际抓包结果调整URL匹配规则
-                    if 'api' in url and ('darkpool' in url.lower() or 'netposition' in url.lower()):
+                    if DataFetchConfig.STOCKGRID_XHR_PATTERN in url.lower():
                         content_type = response.headers.get('content-type', '')
                         if 'application/json' in content_type:
                             try:
@@ -293,8 +292,8 @@ class StockgridFetcher:
             
             page.on("response", handle_response)
             
-            # 访问目标页面
-            target_url = f"{self.base_url}/darkpool/{symbol}"
+            # 访问目标页面（使用外置配置的URL模板）
+            target_url = DataFetchConfig.STOCKGRID_URL.format(symbol=symbol)
             logger.info(f"访问页面: {target_url}")
             
             await page.goto(
@@ -471,35 +470,22 @@ class StockgridFetcher:
         net_position_series: List[float], 
         price_series: List[float]
     ) -> Dict[str, Any]:
-        """检测底背离信号（双周期斜率修正版）
+        """【修复】检测底背离信号：分别对20日和60日周期进行切片拟合
         
         当价格创新低但净头寸斜率转正时，标记为底背离。
         分别计算20日和60日窗口的独立斜率，实现PRD要求的双周期验证。
+        新增Golden Cross检测：双周期斜率皆转正（20d > 0 AND 60d > 0）。
         
         Args:
-            net_position_series: 净头寸时间序列（最近N个数据点，建议>=60）
-            price_series: 价格时间序列（与净头寸对应的时间段）
+            net_position_series: 净头寸时间序列（最近N个数据点，必须>=60）
+            price_series: 价格时间序列（与净头寸对应的时间段，必须>=60）
             
         Returns:
             dict: 背离检测结果
-                {
-                    'divergence': bool,  # 是否检测到背离
-                    'slope_20d': float,  # 20日斜率（独立计算）
-                    'slope_60d': float,  # 60日斜率（独立计算）
-                    'price_trend': str,  # 价格趋势 ('down', 'up', 'flat')
-                    'position_trend': str  # 净头寸趋势 ('up', 'down', 'flat')
-                }
-            
-        Examples:
-            >>> fetcher = StockgridFetcher()
-            >>> result = fetcher.detect_bottom_divergence(net_pos, prices)
-            >>> if result['divergence']:
-            ...     print("✅ 检测到底背离：价格下跌但机构净流入")
-            ...     print(f"20日斜率: {result['slope_20d']:.4f}, 60日斜率: {result['slope_60d']:.4f}")
         """
         try:
-            if len(net_position_series) < 5 or len(price_series) < 5:
-                logger.error("数据点不足，至少需要5个数据点")
+            if len(net_position_series) < 60 or len(price_series) < 60:
+                logger.error(f"数据点不足60个（净头寸={len(net_position_series)}, 价格={len(price_series)}），无法计算完整双周期斜率")
                 return {
                     'divergence': False,
                     'slope_20d': 0.0,
@@ -508,60 +494,40 @@ class StockgridFetcher:
                     'position_trend': 'unknown'
                 }
             
-            # ✅ 修复：分别计算20日和60日窗口的独立斜率
-            # 计算60日斜率（需要至少60个数据点）
-            if len(net_position_series) >= 60:
-                recent_60 = net_position_series[-60:]
-                x_60 = np.arange(60)
-                slope_60d = float(np.polyfit(x_60, recent_60, 1)[0])
-            else:
-                # 数据不足60个，使用全部可用数据
-                x_full = np.arange(len(net_position_series))
-                slope_60d = float(np.polyfit(x_full, net_position_series, 1)[0])
-                logger.warning(f"数据点不足60个（实际{len(net_position_series)}个），60日斜率使用全量数据")
+            # --- 分别切片计算斜率 ---
+            # 60日计算
+            recent_60_pos = net_position_series[-60:]
+            slope_60d = float(np.polyfit(np.arange(60), recent_60_pos, 1)[0])
             
-            # 计算20日斜率（需要至少20个数据点）
-            if len(net_position_series) >= 20:
-                recent_20 = net_position_series[-20:]
-                x_20 = np.arange(20)
-                slope_20d = float(np.polyfit(x_20, recent_20, 1)[0])
-            else:
-                # 数据不足20个，使用60日斜率作为fallback
-                slope_20d = slope_60d
-                logger.warning(f"数据点不足20个（实际{len(net_position_series)}个），20日斜率使用60日斜率")
+            # 20日计算（独立切片，不复用60日数据）
+            recent_20_pos = net_position_series[-20:]
+            slope_20d = float(np.polyfit(np.arange(20), recent_20_pos, 1)[0])
             
-            # 计算价格趋势斜率（使用与净头寸相同的窗口）
-            if len(price_series) >= 60:
-                recent_price_60 = price_series[-60:]
-                price_slope = float(np.polyfit(np.arange(60), recent_price_60, 1)[0])
-            else:
-                x_price = np.arange(len(price_series))
-                price_slope = float(np.polyfit(x_price, price_series, 1)[0])
+            # 价格趋势计算（以近期60日为宏观基准）
+            recent_60_price = price_series[-60:]
+            price_slope = float(np.polyfit(np.arange(60), recent_60_price, 1)[0])
             
-            # 判断趋势方向（基于20日斜率，更敏感）
+            # 判断趋势方向
             position_trend = 'up' if slope_20d > 0 else ('down' if slope_20d < 0 else 'flat')
             price_trend = 'up' if price_slope > 0 else ('down' if price_slope < 0 else 'flat')
             
-            # 检测底背离：价格下跌但净头寸上升
-            divergence = (price_trend == 'down' and position_trend == 'up')
+            # 检测底背离：价格下跌但短期净头寸上升，且双周期斜率皆转正 (黄金交叉)
+            dual_slope_positive = (slope_20d > 0 and slope_60d > 0)
+            divergence = (price_trend == 'down' and position_trend == 'up') or dual_slope_positive
             
             result = {
                 'divergence': divergence,
-                'slope_20d': slope_20d,   # ✅ 修复：独立的20日斜率
-                'slope_60d': slope_60d,   # ✅ 修复：独立的60日斜率
+                'slope_20d': slope_20d,   # 修复：独立的20日斜率
+                'slope_60d': slope_60d,   # 修复：独立的60日斜率
                 'price_trend': price_trend,
                 'position_trend': position_trend
             }
             
             if divergence:
                 logger.warning(
-                    f"✅ 检测到底背离: 价格{price_trend}, 净头寸{position_trend}, "
-                    f"20日斜率={slope_20d:.4f}, 60日斜率={slope_60d:.4f}"
-                )
-            else:
-                logger.info(
-                    f"无背离: 价格{price_trend}, 净头寸{position_trend}, "
-                    f"20日斜率={slope_20d:.4f}, 60日斜率={slope_60d:.4f}"
+                    f"✅ 检测到底背离或双周期转正! "
+                    f"20d斜率={slope_20d:.4f}, 60d斜率={slope_60d:.4f}, "
+                    f"Golden Cross={dual_slope_positive}"
                 )
             
             return result

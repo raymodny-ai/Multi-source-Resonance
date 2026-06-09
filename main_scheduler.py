@@ -626,6 +626,27 @@ class MainScheduler:
                     available_sources=available_sources
                 )
             )
+            
+            # ✅ PRD第6节：极端退化时的紧急推送机制
+            all_darkpool_down = (
+                not available_sources.get('dix', True) and 
+                not available_sources.get('short_ratio', True) and 
+                not available_sources.get('stockgrid', True)
+            )
+            if all_darkpool_down:
+                logger.critical("[CRITICAL] 所有暗盘爬虫接口触发改版异常!")
+                await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.alert_sender.send_multi_channel_alert(
+                        subject="[CRITICAL] 爬虫全线崩溃预警",
+                        message=(
+                            "场外暗盘所有爬虫接口触发改版异常，"
+                            "已退化为纯本地实时衍生品计算流模式，"
+                            "请及时排查前端结构。"
+                        ),
+                        channels=['email', 'telegram']
+                    )
+                )
                 
             # 计算总分
             resonance_result = await loop.run_in_executor(

@@ -339,40 +339,18 @@ class ResonanceScorer:
         dbmf_recovery: bool,
         available_sources: Optional[Dict[str, bool]] = None
     ) -> Dict[str, any]:
-        """计算暗盘维度分值（支持降级逻辑）
+        """支持动态降级逻辑的暗盘评分系统
         
         PRD 第 6 节要求：当某数据源失败时，自动放弃该校验，将判定权交给其他两源，
         权重不作调减。本方法实现这一动态权重重分配逻辑。
         
-        Args:
-            dix_flag: DIX > 45% 信号
-            short_ratio_flag: ChartExchange卖空比 > 45% 信号
-            stockgrid_flag: Stockgrid拐点信号
-            dbmf_recovery: DBMF均线收复标志
-            available_sources: 标记哪些数据源可用
-                              {'dix': True, 'short_ratio': False, 'stockgrid': True}
-                              None 表示全部可用（等同于标准版）
+        available_sources: 标记哪些数据源本次爬取成功
+                          例: {'dix': True, 'short_ratio': False, 'stockgrid': True}
+                          None 表示全部可用（等同于标准版）
         
         Returns:
-            dict: 包含以下字段:
-                - score (float): 分值 0.0~1.5（动态调整）
-                - state (str): 状态，可能包含 '(DEGRADED)' 后缀
-                - details (str): 详细说明，包含可用源数量信息
-        
-        Examples:
-            >>> scorer = ResonanceScorer()
-            >>> # ChartExchange 失败，仅使用 DIX 和 Stockgrid
-            >>> result = scorer.calculate_darkpool_score_with_fallback(
-            ...     dix_flag=True,
-            ...     short_ratio_flag=False,  # 不可用
-            ...     stockgrid_flag=True,
-            ...     dbmf_recovery=False,
-            ...     available_sources={'dix': True, 'short_ratio': False, 'stockgrid': True}
-            ... )
-            >>> print(result['score'])  # 根据可用源动态调整
+            dict: 包含 score, state, details
         """
-        import math
-        
         try:
             # 默认全部可用
             if available_sources is None:
@@ -382,74 +360,59 @@ class ResonanceScorer:
                     'stockgrid': True
                 }
             
-            # 计算可用源总数
+            # 统计当前可用的信号源总量
             total_available = sum(1 for v in available_sources.values() if v)
             
-            # 仅统计可用源的触发数
+            # PRD 第6节：极端全解析失败退化
+            if total_available == 0:
+                logger.critical("[CRITICAL] 场外暗盘所有爬虫接口触发改版异常，已退化为纯本地实时衍生品计算流模式！")
+                return {
+                    'score': 0.0,
+                    'state': 'DEGRADED_CRITICAL',
+                    'details': '全部暗盘源失效，得分降为0'
+                }
+
+            # 仅统计当前存活源的有效触发数
             active_count = 0
-            if available_sources.get('dix', False) and dix_flag:
+            if available_sources.get('dix') and dix_flag:
                 active_count += 1
-            if available_sources.get('short_ratio', False) and short_ratio_flag:
+            if available_sources.get('short_ratio') and short_ratio_flag:
                 active_count += 1
-            if available_sources.get('stockgrid', False) and stockgrid_flag:
+            if available_sources.get('stockgrid') and stockgrid_flag:
                 active_count += 1
-            
-            # 动态调整阈值：至少需要 ceil(total_available * 2/3) 个源触发
-            required_count = max(1, math.ceil(total_available * 2 / 3)) if total_available > 0 else 2
-            
-            # 根据可用源数量动态评分
-            if total_available == 3:
-                # 完整模式：三选二 + DBMF = 1.5分
-                if active_count >= 2 and dbmf_recovery:
-                    score = 1.5
-                    state = 'STRONG_ACCUMULATION'
-                    details = f"暗盘强吸筹确认({active_count}/3指标触发 + DBMF收复)"
-                elif active_count >= 2:
-                    score = 0.75
-                    state = 'MODERATE'
-                    details = f"暗盘中度吸筹({active_count}/3指标触发)"
-                else:
-                    score = 0.0
-                    state = 'WEAK'
-                    details = f"暗盘信号微弱({active_count}/3指标触发)"
-                    
-            elif total_available >= 1:
-                # 部分降级：按比例调整满分上限
-                max_score = 1.5 * (total_available / 3)
-                base_score = 0.75 * (total_available / 3)
-                
-                if active_count >= required_count and dbmf_recovery:
-                    score = max_score
-                    state = 'STRONG_ACCUMULATION (DEGRADED)'
-                    details = f"暗盘强吸筹({active_count}/{total_available}可用源触发 + DBMF, 降级模式)"
-                elif active_count >= required_count:
-                    score = base_score
-                    state = 'MODERATE (DEGRADED)'
-                    details = f"暗盘中度吸筹({active_count}/{total_available}可用源触发, 降级模式)"
-                else:
-                    score = 0.0
-                    state = 'WEAK'
-                    details = f"暗盘信号不足({active_count}/{total_available}可用源触发)"
+
+            # 动态计算所需触发数（满源需要2个，2个存活源也需要2个印证，1个存活源需要1个）
+            required_count = 2 if total_available >= 2 else 1
+
+            # 分数判定：权重不作调减，依然最高1.5分
+            if active_count >= required_count and dbmf_recovery:
+                score = 1.5
+                state = 'STRONG_ACCUMULATION_DEGRADED' if total_available < 3 else 'STRONG_ACCUMULATION'
+            elif active_count >= required_count:
+                score = 0.75
+                state = 'MODERATE_DEGRADED' if total_available < 3 else 'MODERATE'
             else:
-                # 极端退化：暗盘得分为0
                 score = 0.0
-                state = 'DEGRADED_TO_GEX_DBMF'
-                details = "所有暗盘源失效,退化为纯GEX+DBMF模式"
-            
+                state = 'WEAK'
+
+            details = f"暗盘信号({active_count}/{total_available}可用源触发)"
+            if total_available < 3:
+                details += " [处于容错降级模式]"
+
             logger.info(f"暗盘评分(降级模式): {score:.2f}分 - {details}")
-            
+
             return {
                 'score': round(score, 2),
                 'state': state,
                 'details': details
             }
-            
+
         except Exception as e:
-            logger.error(f"暗盘评分(降级模式)计算异常: {str(e)}", exc_info=True)
+            logger.error(f"降级评分计算异常: {e}", exc_info=True)
             return {
                 'score': 0.0,
                 'state': 'ERROR',
-                'details': f'计算异常: {str(e)}'
+                'details': '计算异常'
             }
     
     def calculate_total_score(
