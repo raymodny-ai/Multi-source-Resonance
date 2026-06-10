@@ -3,14 +3,15 @@ import { useDarkpoolHistory } from '../api/darkpool'
 import { useTickers } from '../api/tickers'
 import { formatPercent, formatDecimal } from '../utils/format'
 import type { DarkpoolHistoryPoint, TickerInfo } from '../types/api'
-import ReactEChartsCore from 'echarts-for-react/lib/core'
-import * as echarts from 'echarts/core'
-import { LineChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent, MarkPointComponent, MarkLineComponent, DataZoomComponent, LegendComponent } from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
-import { ChevronDown } from 'lucide-react'
+import _ReactEChartsCore from 'echarts-for-react'
+import type { EChartsOption } from 'echarts'
 
-echarts.use([LineChart, GridComponent, TooltipComponent, MarkPointComponent, MarkLineComponent, DataZoomComponent, LegendComponent, CanvasRenderer])
+// echarts-for-react v3 CJS → ESM interop: Vite production bundles the module namespace,
+// so we need to unwrap .default to get the actual React component.
+const ReactEChartsCore = (
+  (_ReactEChartsCore as unknown as Record<string, unknown>).default ?? _ReactEChartsCore
+) as React.ComponentType<{ option: EChartsOption; style?: React.CSSProperties; notMerge?: boolean }>
+import { ChevronDown } from 'lucide-react'
 
 type RangeOption = 30 | 60 | 90 | 120
 
@@ -62,14 +63,12 @@ export default function DarkpoolDetail() {
       xAxis: { type: 'category' as const, data: dateLabels, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8', fontSize: 9, rotate: 45, interval: Math.floor(dateLabels.length / 8) } },
       yAxis: { type: 'value' as const, min: 0, max: 100, axisLabel: { color: '#94a3b8', fontSize: 10, formatter: '{value}%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
       series: [{
-        name: 'DIX', type: 'line', data: chartData.map((d) => d.dix_value), smooth: true,
+        name: 'DIX', type: 'line' as const, data: chartData.map((d) => d.dix_value), smooth: true,
         lineStyle: { color: '#22c55e', width: 2 }, itemStyle: { color: '#22c55e' }, symbol: 'none',
         markLine: { silent: true, symbol: 'none', lineStyle: { color: '#ef4444', type: 'dashed', width: 1.5 },
           data: [{ yAxis: threshold, label: { formatter: '45%', color: '#ef4444', fontSize: 10, position: 'end' } }] },
         markPoint: { symbol: 'pin', symbolSize: 8, data: aboveThreshold },
-        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-          { offset: 0, color: 'rgba(34,197,94,0.15)' }, { offset: 1, color: 'rgba(34,197,94,0)' }
-        ])},
+        areaStyle: { color: 'rgba(34,197,94,0.08)' },
       }],
       tooltip: { trigger: 'axis' as const, backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 11 },
         formatter: (params: unknown) => {
@@ -77,7 +76,7 @@ export default function DarkpoolDetail() {
           return `<b>${dateLabels[p.dataIndex]}</b><br/>DIX: ${p.value.toFixed(1)}%${p.value > threshold ? ' ⚠️' : ''}`
         }},
       dataZoom: [{ type: 'inside', start: Math.max(0, 100 - (90 / range) * 100), end: 100 }],
-    }
+    } as EChartsOption
   }, [chartData, dateLabels, range])
 
   // --- Short Volume Chart Option ---
@@ -87,13 +86,11 @@ export default function DarkpoolDetail() {
     xAxis: { type: 'category' as const, data: dateLabels, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8', fontSize: 9, rotate: 45, interval: Math.floor(dateLabels.length / 8) } },
     yAxis: { type: 'value' as const, min: 0, max: 100, axisLabel: { color: '#94a3b8', fontSize: 10, formatter: '{value}%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
     series: [{
-      name: 'Short Volume', type: 'line', data: chartData.map((d) => d.chartexchange_short_ratio), smooth: true,
+      name: 'Short Volume', type: 'line' as const, data: chartData.map((d) => d.chartexchange_short_ratio), smooth: true,
       lineStyle: { color: '#eab308', width: 2 }, itemStyle: { color: '#eab308' }, symbol: 'none',
       markLine: { silent: true, symbol: 'none', lineStyle: { color: '#ef4444', type: 'dashed', width: 1.5 },
         data: [{ yAxis: 45, label: { formatter: '45%', color: '#ef4444', fontSize: 10, position: 'end' } }] },
-      areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-        { offset: 0, color: 'rgba(234,179,8,0.15)' }, { offset: 1, color: 'rgba(234,179,8,0)' }
-      ])},
+      areaStyle: { color: 'rgba(234,179,8,0.08)' },
     }],
     tooltip: { trigger: 'axis' as const, backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 11 } },
     dataZoom: [{ type: 'inside', start: Math.max(0, 100 - (90 / range) * 100), end: 100 }],
@@ -205,18 +202,18 @@ export default function DarkpoolDetail() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
           <h3 className="text-sm font-semibold mb-3">DIX 暗盘买入强度（≥45% 高亮）</h3>
-          <ReactEChartsCore echarts={echarts} option={dixOption} style={{ height: 280 }} notMerge />
+          <ReactEChartsCore option={dixOption as EChartsOption} style={{ height: 280 }} notMerge />
         </div>
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
           <h3 className="text-sm font-semibold mb-3">Short Volume 卖空比</h3>
-          <ReactEChartsCore echarts={echarts} option={shortVolumeOption} style={{ height: 280 }} notMerge />
+          <ReactEChartsCore option={shortVolumeOption as EChartsOption} style={{ height: 280 }} notMerge />
         </div>
       </div>
 
       {/* Stockgrid Chart */}
       <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
         <h3 className="text-sm font-semibold mb-3">Stockgrid 净头寸趋势 + 背离标注</h3>
-        <ReactEChartsCore echarts={echarts} option={stockgridOption} style={{ height: 320 }} notMerge />
+        <ReactEChartsCore option={stockgridOption as EChartsOption} style={{ height: 320 }} notMerge />
         <div className="flex flex-wrap items-center gap-4 mt-2 text-[10px] text-[var(--text-secondary)]">
           <span className="flex items-center gap-1"><span className="w-2 h-0.5 bg-[#22c55e] inline-block" /> 20d Slope</span>
           <span className="flex items-center gap-1"><span className="w-2 h-0.5 bg-[#3b82f6] inline-block" style={{ borderTop: '1px dashed #3b82f6' }} /> 60d Slope</span>
