@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -791,6 +792,15 @@ if __name__ == "__main__":
     import uvicorn
 
     if FRONTEND_DIR.exists():
-        app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+        # 挂载静态资源目录 (JS/CSS/images)
+        app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR / "assets")), name="assets")
+        # SPA fallback: 任何未匹配的非 API 路径返回 index.html
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            """SPA fallback - 非 API/静态资源路径返回 index.html"""
+            index_path = FRONTEND_DIR / "index.html"
+            if index_path.exists():
+                return HTMLResponse(content=index_path.read_text(encoding="utf-8"), status_code=200)
+            return HTMLResponse(content="<h1>Frontend not built</h1>", status_code=404)
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8524)

@@ -1,6 +1,5 @@
 import { useState } from 'react'
-import { Outlet, NavLink, useNavigate } from 'react-router-dom'
-import { useAuthStore } from '../stores/authStore'
+import { Outlet, NavLink } from 'react-router-dom'
 import { useTimezoneStore } from '../stores/timezoneStore'
 import { TIMEZONE_OPTIONS } from '../types/common'
 import { formatTime, getCurrentDateStr } from '../utils/time'
@@ -12,7 +11,6 @@ import {
   Bell,
   Monitor,
   Settings,
-  LogOut,
   Menu,
   X,
   Clock,
@@ -30,15 +28,8 @@ const NAV_ITEMS = [
 export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [timezoneMenuOpen, setTimezoneMenuOpen] = useState(false)
-  const navigate = useNavigate()
-  const logout = useAuthStore((s) => s.logout)
   const timezone = useTimezoneStore((s) => s.timezone)
   const setTimezone = useTimezoneStore((s) => s.setTimezone)
-
-  const handleLogout = () => {
-    logout()
-    navigate('/login')
-  }
 
   const handleTimezoneChange = (tz: TimezoneOption) => {
     setTimezone(tz)
@@ -102,17 +93,6 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
-
-        {/* Logout */}
-        <div className="p-2 border-t border-[var(--border)]">
-          <button
-            onClick={handleLogout}
-            className="flex items-center gap-3 w-full px-4 py-2.5 rounded-lg text-sm text-[var(--text-secondary)] hover:text-[var(--accent-red)] hover:bg-red-500/10 transition-colors"
-          >
-            <LogOut size={18} />
-            退出登录
-          </button>
-        </div>
       </aside>
 
       {/* Main content */}
