@@ -59,3 +59,11 @@ htmlcov/
 # Distribution / packaging
 *.tar.gz
 *.zip
+
+# 部署运行时文件
+database/monitoring.db
+database/monitoring.db-shm
+database/monitoring.db-wal
+wiki/
+__pycache__/
+*.pyc

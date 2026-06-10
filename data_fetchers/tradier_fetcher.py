@@ -281,7 +281,7 @@ class TradierFetcher:
                     'close': round(mid_price - random.uniform(0.2, 0.2), 2),
                     'bid': round(mid_price - 0.05, 2),
                     'ask': round(mid_price + 0.05, 2),
-                    'underlying': symbol,
+                    'underlying': round(underlying_price, 2),
                     'strike': strike,
                     'greeks': {
                         'delta': round(random.uniform(-0.5, 0.5), 4),

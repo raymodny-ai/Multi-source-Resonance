@@ -922,6 +922,163 @@ class DatabaseManager:
             logger.error(f"获取数据库统计信息失败: {e}")
             return {}
     
+    def get_latest_vix_analysis(self):
+        """获取最新VIX分析记录"""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='vix_analysis'"
+            )
+            if not cursor.fetchone():
+                return None
+            cursor.execute(
+                "SELECT * FROM vix_analysis ORDER BY timestamp DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            return self._row_to_dict(row)
+        except Exception as e:
+            logger.error(f"查询最新VIX失败: {e}")
+            return None
+
+    def acknowledge_alert(self, alert_id: int) -> bool:
+        """标记告警为已确认 (API别名)"""
+        return self.mark_alert_acknowledged(alert_id)
+
+    def acknowledge_signal(self, signal_id: int) -> bool:
+        """标记信号为已确认"""
+        return self.mark_alert_acknowledged(signal_id)
+
+    def get_latest_signal(self):
+        """获取最新信号记录"""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                "SELECT * FROM signal_alerts ORDER BY trigger_time DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            return self._row_to_dict(row)
+        except Exception as e:
+            logger.error(f"查询最新信号失败: {e}")
+            return None
+
+    def get_alerts(self, page: int = 1, page_size: int = 20, level: str = None, acknowledged: bool = None):
+        """分页获取告警列表"""
+        try:
+            where = []
+            params = []
+            if level and level != 'ALL':
+                where.append("alert_level = ?")
+                params.append(level)
+            if acknowledged is not None:
+                where.append("acknowledged = ?")
+                params.append(1 if acknowledged else 0)
+            where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+            offset = (page - 1) * page_size
+            params.extend([page_size, offset])
+            cursor = self._get_cursor()
+            cursor.execute(
+                f"SELECT * FROM signal_alerts {where_clause} ORDER BY trigger_time DESC LIMIT ? OFFSET ?",
+                params
+            )
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"查询告警列表失败: {e}")
+            return []
+
+    def get_alerts_count(self, level: str = None, acknowledged: bool = None):
+        """获取告警总数"""
+        try:
+            where = []
+            params = []
+            if level and level != 'ALL':
+                where.append("alert_level = ?")
+                params.append(level)
+            if acknowledged is not None:
+                where.append("acknowledged = ?")
+                params.append(1 if acknowledged else 0)
+            where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+            cursor = self._get_cursor()
+            cursor.execute(
+                f"SELECT COUNT(*) FROM signal_alerts {where_clause}", params
+            )
+            return cursor.fetchone()[0]
+        except Exception as e:
+            logger.error(f"查询告警总数失败: {e}")
+            return 0
+
+    def get_signal_history(self, days: int = 30, page: int = 1, page_size: int = 50):
+        """分页获取信号历史"""
+        try:
+            offset = (page - 1) * page_size
+            cursor = self._get_cursor()
+            cursor.execute(
+                """SELECT * FROM signal_alerts
+                   WHERE trigger_time >= datetime('now', '-' || ? || ' days')
+                   ORDER BY trigger_time DESC LIMIT ? OFFSET ?""",
+                (days, page_size, offset)
+            )
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"查询信号历史失败: {e}")
+            return []
+
+    def get_signal_count(self, days: int = 30):
+        """获取信号总数"""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM signal_alerts WHERE trigger_time >= datetime('now', '-' || ? || ' days')",
+                (days,)
+            )
+            return cursor.fetchone()[0]
+        except Exception as e:
+            logger.error(f"查询信号总数失败: {e}")
+            return 0
+
+    def get_gex_history_days(self, days: int = 90):
+        """按天数获取GEX历史 (API用)"""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                "SELECT * FROM gex_history WHERE timestamp >= datetime('now', '-' || ? || ' days') ORDER BY timestamp ASC",
+                (days,)
+            )
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"查询GEX历史失败: {e}")
+            return []
+
+    def get_vix_history(self, days: int = 90):
+        """按天数获取VIX历史"""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='vix_analysis'"
+            )
+            if not cursor.fetchone():
+                return []
+            cursor.execute(
+                "SELECT * FROM vix_analysis WHERE timestamp >= datetime('now', '-' || ? || ' days') ORDER BY timestamp ASC",
+                (days,)
+            )
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"查询VIX历史失败: {e}")
+            return []
+
+    def get_darkpool_history_list(self, days: int = 90):
+        """按天数获取暗盘历史 (返回列表, API用)"""
+        try:
+            cursor = self._get_cursor()
+            cursor.execute(
+                "SELECT * FROM dark_pool_metrics WHERE date >= date('now', '-' || ? || ' days') ORDER BY date ASC",
+                (days,)
+            )
+            return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"查询暗盘历史失败: {e}")
+            return []
+
     def close(self):
         """关闭数据库连接"""
         if self.connection:
