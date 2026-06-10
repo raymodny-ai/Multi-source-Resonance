@@ -29,12 +29,30 @@ export const ALERT_LEVEL_LABELS: Record<AlertLevel, string> = {
 export const STATE_COLORS: Record<string, string> = {
   POSITIVE: '#22c55e',
   CONTANGO: '#22c55e',
+  FLIP_ON: '#22c55e',
   CLEANUP_COMPLETE: '#22c55e',
+  CLEANUP_PENDING: '#eab308',
   STRONG_ACCUMULATION: '#22c55e',
+  TRIGGERED_3OF3: '#22c55e',
+  TRIGGERED_2OF3: '#eab308',
   CONVERGING: '#eab308',
+  NEUTRAL: '#64748b',
+  NORMAL: '#64748b',
   NEGATIVE: '#ef4444',
   BACKWARDATION: '#ef4444',
   LEVERAGE_BUILDUP: '#ef4444',
+}
+
+export const HAWKES_STATE_COLORS: Record<string, string> = {
+  SUBCRITICAL: '#22c55e',
+  CRITICAL: '#eab308',
+  SUPERCRITICAL: '#ef4444',
+}
+
+export const HAWKES_STATE_LABELS: Record<string, string> = {
+  SUBCRITICAL: '亚临界衰竭',
+  CRITICAL: '临界区',
+  SUPERCRITICAL: '超临界自激',
 }
 
 export const TIMEZONE_OPTIONS: { value: TimezoneOption; label: string }[] = [

@@ -145,7 +145,85 @@ export interface AlertRecord {
 }
 
 // --- Incident (事件聚合) ---
-export interface IncidentRecord {
+
+
+// --- 系统状态 ---
+export interface SourceStatus {
+  name: string
+  status: 'ONLINE' | 'DEGRADED' | 'OFFLINE'
+  method: string
+  availability_pct: number
+  failure_count: number
+  last_updated: string
+}
+
+export interface CircuitBreakerStates {
+  [source: string]: 'CLOSED' | 'OPEN' | 'HALF_OPEN'
+}
+
+export interface DegradationDetails {
+  failed_sources: string[]
+  circuit_breaker_states: CircuitBreakerStates
+}
+
+export interface SystemStatusData {
+  sources: SourceStatus[]
+  degradation_mode: boolean
+  degradation_details: DegradationDetails
+  scheduler_running: boolean
+  db_size_mb: number
+  last_backup_time: string
+}
+
+// --- 分页 ---
+export interface PaginatedResponse<T> {
+  data: T[]
+  total: number
+  page: number
+  page_size: number
+}
+
+// --- 配置 ---
+export interface AppConfig {
+  thresholds: Record<string, number>
+  fetch_intervals: {
+    intraday: number
+    crypto: number
+    after_hours: number
+  }
+  notifications: {
+    email_recipients: string
+    telegram_bot_token: string
+    telegram_chat_id: string
+    discord_webhook: string
+  }
+  cooldown_minutes: number
+}
+
+export interface ConfigAuditEntry {
+  timestamp: string
+  user: string
+  field: string
+  old_value: string
+  new_value: string
+}
+
+// --- 通知 ---
+export interface NotificationChannel {
+  name: string
+  connected: boolean
+  last_test: string | null
+}
+
+export interface NotificationConfig {
+  cooldown_minutes: number
+  dnd_start: string | null
+  dnd_end: string | null
+  min_interval_same_level: number
+}
+
+// --- 告警 Incident ---
+export interface Incident {
   id: number
   title: string
   start_time: string
@@ -164,41 +242,12 @@ export interface IncidentTrigger {
   dimension_names: string[]
 }
 
-// --- 系统状态 ---
-export interface SourceStatus {
+export interface IncidentDetail extends Incident {
+  triggers: IncidentTrigger[]
+}
+
+// --- Ticker ---
+export interface TickerInfo {
+  symbol: string
   name: string
-  status: 'ONLINE' | 'DEGRADED' | 'OFFLINE'
-  availability_pct: number
-  failure_count: number
-  last_updated: string
-}
-
-export interface SystemStatusData {
-  sources: SourceStatus[]
-  degradation_mode: boolean
-  scheduler_running: boolean
-}
-
-// --- 分页 ---
-export interface PaginatedResponse<T> {
-  data: T[]
-  total: number
-  page: number
-  page_size: number
-}
-
-// --- 配置 ---
-export interface AppConfig {
-  thresholds: Record<string, number>
-  fetch_intervals: {
-    intraday: number
-    after_hours: number
-  }
-  notifications: {
-    email_recipients: string[]
-    telegram_token: string
-    telegram_chat_id: string
-    discord_webhook: string
-  }
-  cooldown_minutes: number
 }

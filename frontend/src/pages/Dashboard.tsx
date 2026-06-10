@@ -1,49 +1,111 @@
-import { useMemo } from 'react'
+import { useMemo, useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDashboardScores, useRecentAlerts } from '../api/dashboard'
-import { useTimezoneStore } from '../stores/timezoneStore'
 import { useStalenessStore } from '../stores/stalenessStore'
-import DimensionCard from '../components/DimensionCard'
-import { formatCurrency, formatPercent, formatDecimal, formatOI, formatCompact } from '../utils/format'
+import { formatCurrency, formatPercent, formatDecimal, formatOI } from '../utils/format'
 import { formatTime, formatRelativeTime } from '../utils/time'
-import { ALERT_LEVEL_COLORS, ALERT_LEVEL_LABELS } from '../types/common'
+import { ALERT_LEVEL_COLORS, ALERT_LEVEL_LABELS, HAWKES_STATE_COLORS, HAWKES_STATE_LABELS } from '../types/common'
 import type { AlertLevel } from '../types/common'
 import type { DashboardScores } from '../types/api'
+import { Pause, Play, RefreshCw } from 'lucide-react'
+
+function HawkesProgressBar({ branchingRatio, state }: { branchingRatio: number; state: string }) {
+  const pct = Math.min((branchingRatio / 1.0) * 100, 100)
+  const color = HAWKES_STATE_COLORS[state] ?? '#64748b'
+  const label = HAWKES_STATE_LABELS[state] ?? state
+  const isCritical = state === 'CRITICAL' || state === 'SUPERCRITICAL'
+
+  return (
+    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-xs font-semibold text-[var(--text-primary)]">Hawkes 衰竭概率</h3>
+        <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ backgroundColor: `${color}20`, color }}>
+          {label}
+        </span>
+      </div>
+      <div className="relative h-2 bg-[var(--bg-primary)] rounded-full overflow-hidden mb-1">
+        <div
+          className={`h-full rounded-full transition-all duration-700 ${isCritical ? 'animate-pulse' : ''}`}
+          style={{ width: `${pct}%`, backgroundColor: color }}
+        />
+        {/* Critical threshold line at 0.7 */}
+        <div className="absolute top-0 bottom-0 w-px bg-[var(--accent-yellow)]" style={{ left: '70%' }} />
+        <div className="absolute top-0 bottom-0 w-px bg-[var(--accent-red)]" style={{ left: '90%' }} />
+      </div>
+      <div className="flex justify-between text-[10px] text-[var(--text-secondary)]">
+        <span>分支比: {branchingRatio.toFixed(2)}</span>
+        <span>{pct.toFixed(0)}%</span>
+      </div>
+      <div className="flex justify-between text-[9px] text-[var(--text-secondary)] mt-0.5">
+        <span style={{ color: 'var(--accent-green)' }}>0 安全区</span>
+        <span style={{ color: 'var(--accent-yellow)' }}>0.7 警戒</span>
+        <span style={{ color: 'var(--accent-red)' }}>0.9 临界</span>
+        <span>1.0 自激</span>
+      </div>
+    </div>
+  )
+}
 
 export default function Dashboard() {
   const navigate = useNavigate()
-  const timezone = useTimezoneStore((s) => s.timezone)
   const updateSource = useStalenessStore((s) => s.updateSource)
+  const getLastUpdated = useStalenessStore((s) => s.getLastUpdated)
+  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [manualTick, setManualTick] = useState(0)
 
-  const { data, isLoading, isError } = useDashboardScores()
-  const { data: recentAlerts } = useRecentAlerts(3)
+  const { data, isLoading, isError, refetch } = useDashboardScores()
+  const { data: recentAlerts } = useRecentAlerts(5)
 
-  // Update staleness timestamps when data arrives
-  useMemo(() => {
+  // Track staleness
+  useEffect(() => {
     if (data?.timestamp) {
       updateSource('dashboard', new Date(data.timestamp).getTime())
     }
   }, [data, updateSource])
 
+  // Manual refresh toggle - force refetch interval to 30s or Infinity
+  useEffect(() => {
+    if (!autoRefresh) return
+    const timer = setInterval(() => refetch(), 30_000)
+    return () => clearInterval(timer)
+  }, [autoRefresh, refetch])
+
+  const lastUpdated = getLastUpdated('dashboard')
+  const staleSeconds = lastUpdated ? Math.floor((Date.now() - lastUpdated) / 1000) : 0
+  const isStale = staleSeconds > 60
+
+  const handleRefresh = useCallback(() => {
+    refetch()
+    setManualTick((t) => t + 1)
+  }, [refetch])
+
   if (isLoading) {
     return (
       <div className="space-y-4">
-        <h1 className="text-xl font-bold">实时仪表盘</h1>
+        <h1 className="text-xl font-bold text-[var(--text-primary)]">实时仪表盘</h1>
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="h-40 rounded-xl skeleton" />
+            <div key={i} className="h-44 rounded-xl skeleton" />
           ))}
         </div>
+        <div className="h-20 rounded-xl skeleton" />
       </div>
     )
   }
 
   if (isError || !data) {
     return (
-      <div>
-        <h1 className="text-xl font-bold mb-4">实时仪表盘</h1>
-        <div className="bg-[var(--bg-card)] border border-[var(--accent-red)]/30 rounded-xl p-6">
-          <p className="text-[var(--accent-red)]">数据加载失败，请检查后端服务是否运行。</p>
+      <div className="space-y-4">
+        <h1 className="text-xl font-bold text-[var(--text-primary)]">实时仪表盘</h1>
+        <div className="bg-[var(--bg-card)] border border-[var(--accent-red)]/30 rounded-xl p-8 text-center">
+          <p className="text-[var(--accent-red)] text-sm">⚠️ 数据加载失败</p>
+          <p className="text-xs text-[var(--text-secondary)] mt-1">请确认后端服务是否运行在 localhost:8000</p>
+          <button
+            onClick={handleRefresh}
+            className="mt-4 px-4 py-2 rounded-lg bg-[var(--accent-blue)] text-white text-xs hover:opacity-90"
+          >
+            重试
+          </button>
         </div>
       </div>
     )
@@ -51,143 +113,168 @@ export default function Dashboard() {
 
   const { dimensions, resonance, hawkes } = data
   const { gex, vix, crypto, darkpool } = dimensions
-  const now = Date.now()
+  const isLevel3 = resonance.alert_level === 'LEVEL_3'
 
   return (
     <div className="space-y-4 max-w-[1600px]">
-      <h1 className="text-xl font-bold">实时仪表盘</h1>
-
-      {/* Four dimension cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        {/* GEX Card */}
-        <DimensionCard
-          title="GEX Gamma 敞口"
-          score={gex.score}
-          maxScore={1.5}
-          state={gex.state}
-          details={gex.details}
-          lastUpdatedAt={now}
-          onClick={() => navigate('/darkpool')}
-        >
-          <div className="space-y-0.5 text-[10px] text-[var(--text-secondary)]">
-            <div className="flex justify-between">
-              <span>本地 GEX</span>
-              <span className="text-[var(--text-primary)]">{formatCurrency(gex.gex_local)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>校准 GEX</span>
-              <span className="text-[var(--accent-green)]">{formatCurrency(gex.gex_calibrated)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Put Wall</span>
-              <span className="text-[var(--text-primary)]">{gex.put_wall_level}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Flip Zone</span>
-              <span className="text-[var(--text-primary)]">{gex.flip_zone_lower}-{gex.flip_zone_upper}</span>
-            </div>
-          </div>
-        </DimensionCard>
-
-        {/* VIX Card */}
-        <DimensionCard
-          title="VIX 恐慌指数"
-          score={vix.score}
-          maxScore={1.0}
-          state={vix.state}
-          details={vix.details}
-          lastUpdatedAt={now}
-          onClick={() => navigate('/signals')}
-        >
-          <div className="space-y-0.5 text-[10px] text-[var(--text-secondary)]">
-            <div className="flex justify-between">
-              <span>VIX Spot</span>
-              <span className="text-[var(--text-primary)]">{formatDecimal(vix.vix_spot, 1)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>VX1 / VX2</span>
-              <span className="text-[var(--text-primary)]">{formatDecimal(vix.vx1, 1)}/{formatDecimal(vix.vx2, 1)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>期限结构</span>
-              <span
-                className={vix.term_structure_ratio < 1 ? 'text-[var(--accent-red)]' : 'text-[var(--accent-green)]'}
-              >
-                {formatDecimal(vix.term_structure_ratio, 2)}
-              </span>
-            </div>
-          </div>
-        </DimensionCard>
-
-        {/* Crypto Card */}
-        <DimensionCard
-          title="加密衍生品"
-          score={crypto.score}
-          maxScore={1.0}
-          state={crypto.state}
-          details={crypto.details}
-          lastUpdatedAt={now}
-        >
-          <div className="space-y-0.5 text-[10px] text-[var(--text-secondary)]">
-            <div className="flex justify-between">
-              <span>BTC 资金费率</span>
-              <span
-                className={crypto.btc_funding_rate > 0 ? 'text-[var(--accent-green)]' : 'text-[var(--accent-red)]'}
-              >
-                {formatDecimal(crypto.btc_funding_rate, 4)}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span>BTC OI</span>
-              <span className="text-[var(--text-primary)]">{formatOI(crypto.btc_oi)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>OI 1h 变化</span>
-              <span
-                className={crypto.oi_change_1h < 0 ? 'text-[var(--accent-green)]' : 'text-[var(--accent-red)]'}
-              >
-                {formatPercent(crypto.oi_change_1h, 1)}
-              </span>
-            </div>
-          </div>
-        </DimensionCard>
-
-        {/* Darkpool Card */}
-        <DimensionCard
-          title="暗盘三驾马车"
-          score={darkpool.score}
-          maxScore={1.5}
-          state={darkpool.state}
-          details={darkpool.details}
-          lastUpdatedAt={now}
-          onClick={() => navigate('/darkpool')}
-        >
-          <div className="space-y-0.5 text-[10px] text-[var(--text-secondary)]">
-            <div className="flex justify-between">
-              <span>DIX</span>
-              <span className={darkpool.dix_signal ? 'text-[var(--accent-green)]' : 'text-[var(--text-secondary)]'}>
-                {formatPercent(darkpool.dix_value)} {darkpool.dix_signal ? '✅' : ''}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span>Short Vol</span>
-              <span className={darkpool.short_ratio_signal ? 'text-[var(--accent-green)]' : 'text-[var(--text-secondary)]'}>
-                {formatPercent(darkpool.short_ratio)} {darkpool.short_ratio_signal ? '✅' : ''}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span>Stockgrid</span>
-              <span className={darkpool.stockgrid_signal ? 'text-[var(--accent-green)]' : 'text-[var(--text-secondary)]'}>
-                {darkpool.stockgrid_signal ? '✅' : '--'}
-              </span>
-            </div>
-          </div>
-        </DimensionCard>
+      {/* Header with controls */}
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-bold text-[var(--text-primary)]">实时仪表盘</h1>
+        <div className="flex items-center gap-2">
+          <span className={`text-[10px] flex items-center gap-1 ${isStale ? 'text-[var(--accent-yellow)]' : 'text-[var(--accent-green)]'}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${isStale ? 'bg-[var(--accent-yellow)] animate-pulse' : 'bg-[var(--accent-green)]'}`} />
+            {isStale ? `延迟 ${staleSeconds}s` : 'LIVE'}
+          </span>
+          <button
+            onClick={() => setAutoRefresh(!autoRefresh)}
+            className="p-1.5 rounded-md text-[var(--text-secondary)] hover:text-white hover:bg-white/5 transition-colors"
+            title={autoRefresh ? '暂停自动刷新' : '恢复自动刷新'}
+          >
+            {autoRefresh ? <Pause size={14} /> : <Play size={14} />}
+          </button>
+          <button
+            onClick={handleRefresh}
+            className="p-1.5 rounded-md text-[var(--text-secondary)] hover:text-white hover:bg-white/5 transition-colors"
+            title="立即刷新"
+          >
+            <RefreshCw size={14} />
+          </button>
+        </div>
       </div>
 
-      {/* Resonance score bar */}
+      {/* Four dimension cards - responsive grid */}
+      <div className={`grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 ${isStale ? 'opacity-60' : ''}`}>
+        {/* GEX Card */}
+        <div
+          className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4 cursor-pointer hover:border-white/20 transition-all group"
+          onClick={() => navigate('/darkpool')}
+        >
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold">GEX Gamma 敞口</h3>
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded font-medium"
+              style={{
+                backgroundColor: `${gex.state === 'FLIP_ON' ? '#22c55e' : gex.state === 'NEGATIVE' ? '#ef4444' : '#64748b'}20`,
+                color: gex.state === 'FLIP_ON' ? '#22c55e' : gex.state === 'NEGATIVE' ? '#ef4444' : '#94a3b8',
+              }}
+            >
+              {gex.state === 'FLIP_ON' ? 'FLIP ON' : gex.state}
+            </span>
+          </div>
+          <div className="text-2xl font-bold mb-1" style={{ color: gex.state === 'FLIP_ON' ? '#22c55e' : gex.state === 'NEGATIVE' ? '#ef4444' : '#f1f5f9' }}>
+            {formatCurrency(gex.gex_calibrated)}
+          </div>
+          <div className="space-y-0.5 text-[10px] text-[var(--text-secondary)]">
+            <div className="flex justify-between"><span>本地 GEX</span><span className="text-[var(--text-primary)]">{formatCurrency(gex.gex_local)}</span></div>
+            <div className="flex justify-between"><span>Put Wall</span><span className="text-[var(--text-primary)]">{gex.put_wall_level}</span></div>
+            <div className="flex justify-between"><span>Flip Zone</span><span className="text-[var(--text-primary)]">{gex.flip_zone_lower} - {gex.flip_zone_upper}</span></div>
+          </div>
+          <div className="mt-2 flex items-center gap-1">
+            <div className="flex-1 h-1 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+              <div className="h-full bg-[#22c55e] rounded-full transition-all duration-700" style={{ width: `${(gex.score / 1.5) * 100}%` }} />
+            </div>
+            <span className="text-[10px] text-[var(--text-secondary)]">{gex.score.toFixed(1)}/1.5</span>
+          </div>
+        </div>
+
+        {/* VIX Card */}
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4 cursor-pointer hover:border-white/20 transition-all" onClick={() => navigate('/signals')}>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold">VIX 期限结构</h3>
+            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium"
+              style={{
+                backgroundColor: `${vix.state === 'CONTANGO' ? '#22c55e' : vix.state === 'BACKWARDATION' ? '#ef4444' : '#64748b'}20`,
+                color: vix.state === 'CONTANGO' ? '#22c55e' : vix.state === 'BACKWARDATION' ? '#ef4444' : '#94a3b8',
+              }}>
+              {vix.state}
+            </span>
+          </div>
+          <div className="text-2xl font-bold mb-1 text-[var(--text-primary)]">{formatDecimal(vix.vix_spot, 1)}</div>
+          <div className="space-y-0.5 text-[10px] text-[var(--text-secondary)]">
+            <div className="flex justify-between"><span>VX1 / VX2</span><span className="text-[var(--text-primary)]">{formatDecimal(vix.vx1, 1)}/{formatDecimal(vix.vx2, 1)}</span></div>
+            <div className="flex justify-between"><span>期限结构比</span>
+              <span className={vix.term_structure_ratio < 1 ? 'text-[var(--accent-red)]' : 'text-[var(--accent-green)]'}>{formatDecimal(vix.term_structure_ratio, 2)}</span>
+            </div>
+            <div className="flex justify-between"><span>恐慌溢价</span><span className="text-[var(--text-primary)]">{formatDecimal(vix.panic_premium, 2)}</span></div>
+          </div>
+          <div className="mt-2 flex items-center gap-1">
+            <div className="flex-1 h-1 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+              <div className="h-full bg-[#22c55e] rounded-full transition-all duration-700" style={{ width: `${(vix.score / 1.0) * 100}%` }} />
+            </div>
+            <span className="text-[10px] text-[var(--text-secondary)]">{vix.score.toFixed(1)}/1.0</span>
+          </div>
+        </div>
+
+        {/* Crypto Card */}
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4 cursor-pointer hover:border-white/20 transition-all">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold">Crypto 去杠杆</h3>
+            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium"
+              style={{
+                backgroundColor: `${crypto.state === 'CLEANUP_COMPLETE' ? '#22c55e' : crypto.state === 'LEVERAGE_BUILDUP' ? '#ef4444' : '#64748b'}20`,
+                color: crypto.state === 'CLEANUP_COMPLETE' ? '#22c55e' : crypto.state === 'LEVERAGE_BUILDUP' ? '#ef4444' : '#94a3b8',
+              }}>
+              {crypto.state === 'CLEANUP_COMPLETE' ? 'CLEANUP COMPLETE' : crypto.state}
+            </span>
+          </div>
+          <div className="text-2xl font-bold mb-1 text-[var(--text-primary)]">{formatOI(crypto.btc_oi)}</div>
+          <div className="space-y-0.5 text-[10px] text-[var(--text-secondary)]">
+            <div className="flex justify-between"><span>BTC 资金费率</span>
+              <span className={crypto.btc_funding_rate > 0 ? 'text-[var(--accent-green)]' : 'text-[var(--accent-red)]'}>{formatDecimal(crypto.btc_funding_rate, 4)}</span>
+            </div>
+            <div className="flex justify-between"><span>OI 1h 变化</span>
+              <span className={crypto.oi_change_1h < 0 ? 'text-[var(--accent-green)]' : 'text-[var(--accent-red)]'}>{formatPercent(crypto.oi_change_1h, 1)}</span>
+            </div>
+            <div className="flex justify-between"><span>杠杆清洗</span>
+              <span className={crypto.leverage_cleanup_confirmed ? 'text-[var(--accent-green)]' : 'text-[var(--text-secondary)]'}>
+                {crypto.leverage_cleanup_confirmed ? '✅ 已完成' : '⏳ 进行中'}
+              </span>
+            </div>
+          </div>
+          <div className="mt-2 flex items-center gap-1">
+            <div className="flex-1 h-1 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+              <div className="h-full bg-[#22c55e] rounded-full transition-all duration-700" style={{ width: `${(crypto.score / 1.0) * 100}%` }} />
+            </div>
+            <span className="text-[10px] text-[var(--text-secondary)]">{crypto.score.toFixed(1)}/1.0</span>
+          </div>
+        </div>
+
+        {/* Darkpool Card */}
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4 cursor-pointer hover:border-white/20 transition-all" onClick={() => navigate('/darkpool')}>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold">暗盘综合</h3>
+            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium"
+              style={{
+                backgroundColor: `${darkpool.state === 'TRIGGERED_3OF3' || darkpool.state === 'STRONG_ACCUMULATION' ? '#22c55e' : '#64748b'}20`,
+                color: darkpool.state === 'TRIGGERED_3OF3' || darkpool.state === 'STRONG_ACCUMULATION' ? '#22c55e' : '#94a3b8',
+              }}>
+              {darkpool.state === 'TRIGGERED_3OF3' ? '3/3 SIGNALS' : darkpool.state}
+            </span>
+          </div>
+          <div className="text-2xl font-bold mb-1 text-[var(--text-primary)]">{formatPercent(darkpool.dix_value, 1)}</div>
+          <div className="space-y-0.5 text-[10px] text-[var(--text-secondary)]">
+            <div className="flex justify-between"><span>DIX</span>
+              <span className={darkpool.dix_signal ? 'text-[var(--accent-green)]' : ''}>{formatPercent(darkpool.dix_value, 1)} {darkpool.dix_signal ? '✅' : ''}</span>
+            </div>
+            <div className="flex justify-between"><span>Short Vol</span>
+              <span className={darkpool.short_ratio_signal ? 'text-[var(--accent-green)]' : ''}>{formatPercent(darkpool.short_ratio, 1)} {darkpool.short_ratio_signal ? '✅' : ''}</span>
+            </div>
+            <div className="flex justify-between"><span>Stockgrid</span>
+              <span className={darkpool.stockgrid_signal ? 'text-[var(--accent-green)]' : ''}>{darkpool.stockgrid_signal ? '✅ 触发' : '--'}</span>
+            </div>
+          </div>
+          <div className="mt-2 flex items-center gap-1">
+            <div className="flex-1 h-1 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+              <div className="h-full bg-[#22c55e] rounded-full transition-all duration-700" style={{ width: `${(darkpool.score / 1.5) * 100}%` }} />
+            </div>
+            <span className="text-[10px] text-[var(--text-secondary)]">{darkpool.score.toFixed(1)}/1.5</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Resonance Banner */}
       <div
-        className="rounded-xl p-4 border-2 transition-all"
+        className={`rounded-xl p-4 border-2 transition-all ${isLevel3 ? 'pulse-alert' : ''}`}
         style={{
           borderColor: ALERT_LEVEL_COLORS[resonance.alert_level],
           backgroundColor: `${ALERT_LEVEL_COLORS[resonance.alert_level]}08`,
@@ -195,19 +282,23 @@ export default function Dashboard() {
       >
         <div className="flex items-center justify-between mb-2">
           <span className="text-sm font-semibold">共振得分</span>
-          <span
-            className="text-xs font-bold px-2 py-0.5 rounded"
-            style={{
-              backgroundColor: ALERT_LEVEL_COLORS[resonance.alert_level],
-              color: '#fff',
-            }}
-          >
+          <span className="text-xs font-bold px-2 py-0.5 rounded text-white"
+            style={{ backgroundColor: ALERT_LEVEL_COLORS[resonance.alert_level] }}>
             {ALERT_LEVEL_LABELS[resonance.alert_level]}
           </span>
         </div>
 
-        {/* Progress bar */}
-        <div className="relative h-3 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+        {/* Main progress bar */}
+        <div className="relative h-4 bg-[var(--bg-primary)] rounded-full overflow-hidden mb-2">
+          {/* Section dividers for each dimension's max contribution */}
+          {[
+            { pct: 30, color: '#22c55e30' },    // GEX 1.5/5.0
+            { pct: 50, color: '#3b82f630' },     // VIX 1.0/5.0
+            { pct: 70, color: '#eab30830' },      // Crypto 1.0/5.0
+            { pct: 100, color: '#a855f730' },     // Darkpool 1.5/5.0
+          ].map((div) => (
+            <div key={div.pct} className="absolute top-0 bottom-0 w-px bg-white/20" style={{ left: `${div.pct}%` }} />
+          ))}
           <div
             className="h-full rounded-full transition-all duration-700"
             style={{
@@ -217,62 +308,71 @@ export default function Dashboard() {
           />
         </div>
 
-        <div className="flex items-center justify-between mt-2">
+        <div className="flex items-center justify-between">
           <span className="text-2xl font-bold" style={{ color: ALERT_LEVEL_COLORS[resonance.alert_level] }}>
-            {resonance.total_score.toFixed(1)}/{resonance.max_score.toFixed(1)}
+            {resonance.total_score.toFixed(1)}<span className="text-sm text-[var(--text-secondary)]">/{resonance.max_score.toFixed(1)}</span>
           </span>
-          <span className="text-xs text-[var(--text-secondary)]">
-            {resonance.resonance_pct.toFixed(0)}%
-          </span>
+          <span className="text-xs text-[var(--text-secondary)]">{resonance.resonance_pct.toFixed(0)}%</span>
         </div>
 
-        {/* Trigger conditions */}
+        {/* Trigger conditions chips */}
         <div className="flex flex-wrap gap-2 mt-3">
           {[
-            { label: 'GEX', active: gex.score > 0 },
-            { label: 'VIX', active: vix.score > 0 },
-            { label: 'Crypto', active: crypto.score > 0 },
-            { label: 'Darkpool', active: darkpool.score > 0 },
-            { label: 'Hawkes', active: hawkes.branching_ratio < 0.7 },
+            { label: 'GEX', active: gex.score > 0, score: gex.score, max: 1.5 },
+            { label: 'VIX', active: vix.score > 0, score: vix.score, max: 1.0 },
+            { label: 'Crypto', active: crypto.score > 0, score: crypto.score, max: 1.0 },
+            { label: 'Darkpool', active: darkpool.score > 0, score: darkpool.score, max: 1.5 },
+            { label: 'Hawkes', active: hawkes.branching_ratio < 0.7, score: hawkes.branching_ratio, max: 0 },
           ].map((cond) => (
             <span
               key={cond.label}
-              className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded ${
+              className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded-full border transition-all ${
                 cond.active
-                  ? 'bg-[var(--accent-green)]/15 text-[var(--accent-green)]'
-                  : 'bg-[var(--border)]/30 text-[var(--text-secondary)]'
+                  ? 'border-[var(--accent-green)]/30 bg-[var(--accent-green)]/10 text-[var(--accent-green)]'
+                  : 'border-[var(--border)] text-[var(--text-secondary)]'
               }`}
             >
               <span className={`w-1.5 h-1.5 rounded-full ${cond.active ? 'bg-[var(--accent-green)]' : 'bg-[var(--text-secondary)]'}`} />
               {cond.label}
+              {cond.max > 0 && <span className="opacity-60">({cond.score}/{cond.max})</span>}
             </span>
           ))}
         </div>
       </div>
 
+      {/* Hawkes Progress Bar */}
+      <HawkesProgressBar branchingRatio={hawkes.branching_ratio} state={hawkes.state} />
+
       {/* Recent alerts */}
       {recentAlerts && recentAlerts.length > 0 && (
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
-          <h3 className="text-sm font-semibold mb-3">最近告警</h3>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold">最近告警</h3>
+            <button
+              onClick={() => navigate('/alerts')}
+              className="text-[10px] text-[var(--accent-blue)] hover:underline"
+            >
+              查看全部 →
+            </button>
+          </div>
+          <div className="space-y-1">
             {recentAlerts.map((alert) => (
               <button
                 key={alert.id}
                 onClick={() => navigate('/alerts')}
-                className="flex items-center gap-1.5 text-xs px-2 py-1 rounded border border-[var(--border)] hover:border-white/30 transition-colors"
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left hover:bg-white/5 transition-colors group"
               >
-                <span
-                  className="w-1.5 h-1.5 rounded-full"
-                  style={{ backgroundColor: ALERT_LEVEL_COLORS[alert.alert_level as AlertLevel] }}
-                />
-                <span className="text-[var(--text-secondary)]">
-                  {formatTime(alert.trigger_time, timezone)}
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: ALERT_LEVEL_COLORS[alert.alert_level as AlertLevel] }} />
+                <span className="text-[10px] text-[var(--text-secondary)] w-12 shrink-0">
+                  {formatTime(alert.trigger_time, 'America/New_York', 'HH:mm')}
                 </span>
-                <span className="font-medium">
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded text-white"
+                  style={{ backgroundColor: ALERT_LEVEL_COLORS[alert.alert_level as AlertLevel] }}>
                   {ALERT_LEVEL_LABELS[alert.alert_level as AlertLevel]}
                 </span>
-                <span className="text-[var(--text-secondary)]">
-                  {alert.total_score.toFixed(1)}
+                <span className="text-[10px] text-[var(--text-primary)]">{alert.total_score.toFixed(1)}</span>
+                <span className="text-[10px] text-[var(--text-secondary)] ml-auto">
+                  {alert.acknowledged ? '✅ 已确认' : '⬜ 未确认'}
                 </span>
               </button>
             ))}
@@ -280,10 +380,10 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Last updated timestamp */}
+      {/* Footer - last update timestamp */}
       <p className="text-[10px] text-[var(--text-secondary)] text-right">
-        最后更新: {formatTime(data.timestamp, timezone, 'HH:mm:ss')}
-        {' '}({formatRelativeTime(data.timestamp)})
+        最后更新: {formatTime(data.timestamp, 'America/New_York', 'HH:mm:ss')} EST
+        {' · '}{formatRelativeTime(data.timestamp)}
       </p>
     </div>
   )
