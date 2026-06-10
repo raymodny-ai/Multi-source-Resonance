@@ -2,7 +2,7 @@
 多源共振监控系统 - DBMF ETF动量监控获取器
 
 该模块负责从Yahoo Finance获取DBMF ETF（Managed Futures策略影子基金）的实时价格，
-用于监检测试量化趋势基金的日内反转信号。
+用于监控量化趋势基金的日内反转信号。
 
 主要功能:
 - 获取DBMF实时价格
@@ -13,10 +13,10 @@ DBMF逻辑:
 - DBMF是CTA趋势跟踪策略的代表性ETF
 - 当市场恐慌下跌时，DBMF通常会跟随下跌
 - 若DBMF日内探底后强劲反弹并收复MA5，表明量化空头动能枯竭
+
+v2 变更: 从 raw Yahoo v8 API (429) 迁移到 yfinance.Ticker
 """
 
-import requests
-from requests.exceptions import Timeout, ConnectionError, HTTPError
 import numpy as np
 from typing import Optional, List
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -26,312 +26,179 @@ from config.settings import Config
 
 logger = getLogger('dbmf_fetcher')
 
+# 延迟导入，避免 yfinance 初始化打乱日志
+_yf = None
+
+
+def _get_yf():
+    global _yf
+    if _yf is None:
+        import yfinance as _yf_mod
+        _yf = _yf_mod
+    return _yf
+
 
 class DBMFFetcher:
-    """DBMF ETF动量监控获取器
-    
-    通过Yahoo Finance API获取DBMF ETF的实时价格和历史数据，
+    """DBMF ETF动量监控获取器 (yfinance 后端)
+
+    通过 yfinance 获取 DBMF ETF 的实时价格和历史数据，
     用于判断量化趋势基金是否出现底部反转信号。
-    
-    Attributes:
-        base_url: Yahoo Finance API基础URL
-        timeout: 请求超时时间(秒)
-        mock_mode: Mock模式开关
+
+    对比旧版 raw Yahoo v8 API:
+    - 旧版: requests.get + crumb/cookie → 频繁 429 rate limit
+    - 新版: yfinance.Ticker → 自动处理 cookie/crumb/重试
     """
-    
+
+    SYMBOL = "DBMF"
+
     def __init__(self, mock_mode: bool = False):
-        """初始化DBMF数据获取器
-        
-        Args:
-            mock_mode: Mock模式开关，用于无网络连接时的测试
-        """
-        self.base_url = "https://query1.finance.yahoo.com/v8/finance/chart"
-        self.timeout = Config.REQUEST_TIMEOUT
         self.mock_mode = mock_mode
-        
-        logger.info(f"DBMFFetcher初始化完成 (mock_mode={mock_mode})")
-    
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type((requests.exceptions.RequestException, ConnectionError)),
-        reraise=True
-    )
+        self._ticker = None
+        logger.info(f"DBMFFetcher初始化完成 (mock_mode={mock_mode}, backend=yfinance)")
+
+    def _get_ticker(self):
+        """懒加载 yfinance Ticker"""
+        if self._ticker is None:
+            yf = _get_yf()
+            self._ticker = yf.Ticker(self.SYMBOL)
+        return self._ticker
+
     def get_dbmf_intraday_price(self) -> Optional[float]:
         """获取DBMF ETF实时价格
-        
-        从Yahoo Finance获取DBMF ETF的最新交易价格。
-        
+
         Returns:
             float: DBMF实时价格，失败时返回None
-            
-        Raises:
-            DataFetchError: API请求失败时抛出
-            
-        Examples:
-            >>> fetcher = DBMFFetcher()
-            >>> price = fetcher.get_dbmf_intraday_price()
-            >>> if price:
-            ...     print(f"DBMF当前价格: ${price:.2f}")
         """
         if self.mock_mode:
-            logger.warning("Mock模式: 返回模拟DBMF价格")
             return self._get_mock_dbmf_price()
-        
-        symbol = "DBMF"
-        url = f"{self.base_url}/{symbol}"
-        params = {
-            'range': '1d',
-            'interval': '1m'
-        }
-        
+
         try:
-            logger.info(f"请求Yahoo Finance API获取DBMF价格: symbol={symbol}")
-            response = requests.get(
-                url,
-                params=params,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            # 解析价格数据
-            result = data.get('chart', {}).get('result', [])
-            if not result:
-                logger.error("API响应中缺少结果数据")
+            ticker = self._get_ticker()
+            info = ticker.info
+
+            # 优先 regularMarketPrice，其次 currentPrice，最后 fast_info
+            price = (info.get('regularMarketPrice')
+                     or info.get('currentPrice')
+                     or info.get('previousClose'))
+
+            if price is None:
+                # 降级到 history
+                hist = ticker.history(period='1d')
+                if not hist.empty and 'Close' in hist.columns:
+                    price = float(hist['Close'].iloc[-1])
+
+            if price is None:
+                logger.error("无法获取DBMF价格（所有路径均失败）")
                 return None
-            
-            meta = result[0].get('meta', {})
-            current_price = meta.get('regularMarketPrice')
-            
-            if current_price is None:
-                logger.error("无法获取DBMF价格")
-                return None
-            
-            price = float(current_price)
-            logger.debug(f"成功获取DBMF价格: ${price:.2f}")
-            return price
-            
-        except Timeout as e:
-            logger.error(f"Request timeout for DBMF price: {e}")
-            return None
-        except ConnectionError as e:
-            logger.error(f"Connection error for DBMF price: {e}")
-            return None
-        except HTTPError as e:
-            logger.error(f"HTTP error {e.response.status_code} for DBMF price: {e}")
-            return None
-        except ValueError as e:
-            logger.error(f"JSON decode error for DBMF price: {e}")
-            return None
+
+            result = float(price)
+            logger.debug(f"DBMF实时价格: ${result:.2f}")
+            return result
+
         except Exception as e:
-            logger.error(f"Unexpected error fetching DBMF price: {e}", exc_info=True)
+            logger.error(f"获取DBMF价格失败: {e}")
             return None
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type((requests.exceptions.RequestException, ConnectionError)),
-        reraise=True
+        retry=retry_if_exception_type((Exception,)),
+        reraise=True,
     )
     def get_dbmf_historical_prices(self, period: str = '5d') -> Optional[List[float]]:
-        """获取DBMF历史价格序列
-        
-        从Yahoo Finance获取指定时间段的历史收盘价，用于计算移动平均线。
-        
+        """获取DBMF历史收盘价序列
+
         Args:
-            period: 时间周期，如'5d'、'1mo'、'3mo'
-            
+            period: 时间周期，如 '5d', '1mo', '3mo'
+
         Returns:
-            list: 收盘价列表（按时间顺序），失败时返回None
-            
-        Raises:
-            DataFetchError: API请求失败时抛出
-            
-        Examples:
-            >>> fetcher = DBMFFetcher()
-            >>> prices = fetcher.get_dbmf_historical_prices('5d')
-            >>> if prices:
-            ...     print(f"获取到{len(prices)}个价格数据点")
+            list[float]: 收盘价列表（按时间顺序），失败时返回None
         """
         if self.mock_mode:
-            logger.warning(f"Mock模式: 返回模拟DBMF历史价格 ({period})")
             return self._get_mock_dbmf_historical_prices(period)
-        
-        symbol = "DBMF"
-        url = f"{self.base_url}/{symbol}"
-        params = {
-            'range': period,
-            'interval': '1d'  # 日线数据
-        }
-        
+
         try:
-            logger.info(f"请求Yahoo Finance API获取DBMF历史价格: period={period}")
-            response = requests.get(
-                url,
-                params=params,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            # 解析历史数据
-            result = data.get('chart', {}).get('result', [])
-            if not result:
-                logger.error("API响应中缺少结果数据")
+            ticker = self._get_ticker()
+            hist = ticker.history(period=period)
+
+            if hist.empty or 'Close' not in hist.columns:
+                logger.error(f"DBMF历史数据为空 (period={period})")
                 return None
-            
-            quotes = result[0].get('indicators', {}).get('quote', [{}])[0]
-            close_prices = quotes.get('close', [])
-            
-            # 过滤None值
-            valid_prices = [float(p) for p in close_prices if p is not None]
-            
-            if not valid_prices:
-                logger.error("没有有效的价格数据")
+
+            prices = [float(v) for v in hist['Close'].tolist() if v is not None]
+            if not prices:
+                logger.error("没有有效的DBMF历史价格")
                 return None
-            
-            logger.debug(f"成功获取DBMF历史价格: {len(valid_prices)}个数据点")
-            return valid_prices
-            
-        except Timeout as e:
-            logger.error(f"Request timeout for DBMF history: {e}")
-            return None
-        except ConnectionError as e:
-            logger.error(f"Connection error for DBMF history: {e}")
-            return None
-        except HTTPError as e:
-            logger.error(f"HTTP error {e.response.status_code} for DBMF history: {e}")
-            return None
-        except ValueError as e:
-            logger.error(f"JSON decode error for DBMF history: {e}")
-            return None
+
+            logger.debug(f"DBMF历史价格: {len(prices)}点 (period={period})")
+            return prices
+
         except Exception as e:
-            logger.error(f"Unexpected error fetching DBMF history: {e}", exc_info=True)
+            logger.error(f"获取DBMF历史价格失败: {e}", exc_info=True)
             return None
-    
+
     def check_ma5_recovery(
-        self, 
-        current_price: float, 
-        historical_prices: List[float]
+        self,
+        current_price: float,
+        historical_prices: List[float],
     ) -> Optional[bool]:
         """检测DBMF是否收复5日均线且涨幅>2%
-        
-        判断DBMF是否在日内探底后强劲反弹，收盘价站上MA5且涨幅超过2%。
-        这是量化空头动能枯竭的重要信号。
-        
+
         Args:
-            current_price: 当前价格（或当日收盘价）
-            historical_prices: 历史价格列表（至少包含最近5个交易日）
-                               最后一个元素应为昨日收盘价
-            
+            current_price: 当前价格
+            historical_prices: 历史收盘价列表（至少5个）
+
         Returns:
-            bool: True表示满足条件（收复MA5且涨幅>2%）
-                 False表示不满足
-                 None表示数据不足或计算失败
-            
-        Examples:
-            >>> fetcher = DBMFFetcher()
-            >>> prices = fetcher.get_dbmf_historical_prices('5d')
-            >>> current = fetcher.get_dbmf_intraday_price()
-            >>> if current and prices:
-            ...     recovery = fetcher.check_ma5_recovery(current, prices)
-            ...     if recovery:
-            ...         print("✅ DBMF收复MA5且涨幅>2%，量化空头动能枯竭")
+            True/False/None
         """
         try:
             if not historical_prices or len(historical_prices) < 5:
-                logger.error(f"历史价格数据不足，需要至少5个数据点，当前{len(historical_prices) if historical_prices else 0}个")
+                logger.error(f"历史价格不足，需≥5，实际{len(historical_prices) if historical_prices else 0}")
                 return None
-            
-            # 取最近5个交易日的收盘价
-            last_5_prices = historical_prices[-5:]
-            
-            # 计算5日移动平均线
-            ma5 = np.mean(last_5_prices)
-            
-            # 计算昨日收盘价（用于计算涨幅）
-            yesterday_close = last_5_prices[-1]
-            
+
+            last_5 = historical_prices[-5:]
+            ma5 = float(np.mean(last_5))
+            yesterday_close = last_5[-1]
+
             if yesterday_close == 0:
-                logger.error("昨日收盘价为0，避免除零错误")
+                logger.error("昨日收盘价=0，无法计算涨幅")
                 return None
-            
-            # 计算涨幅
-            gain_percent = ((current_price - yesterday_close) / yesterday_close) * 100
-            
-            # 判断条件：站上MA5且涨幅>2%
-            above_ma5 = current_price > ma5
-            significant_gain = gain_percent > 2.0
-            
-            recovery = above_ma5 and significant_gain
-            
+
+            gain_pct = ((current_price - yesterday_close) / yesterday_close) * 100
+            recovery = current_price > ma5 and gain_pct > 2.0
+
             logger.info(
-                f"DBMF MA5检测: 当前价=${current_price:.2f}, MA5=${ma5:.2f}, "
-                f"涨幅={gain_percent:.2f}%, 站上MA5={above_ma5}, 涨幅>2%={significant_gain}, "
-                f"结果={'✅ 收复' if recovery else '❌ 未收复'}"
+                f"DBMF MA5: 现价${current_price:.2f} MA5=${ma5:.2f} "
+                f"涨幅={gain_pct:.2f}% → {'✅ 收复' if recovery else '❌ 未收复'}"
             )
-            
+
             if recovery:
-                logger.warning("⚠️ DBMF收复MA5且涨幅>2%，量化空头动能可能已枯竭")
-            
+                logger.warning("⚠️ DBMF收复MA5 + 涨幅>2% → 量化空头动能枯竭")
+
             return recovery
-            
+
         except Exception as e:
-            logger.error(f"MA5恢复检测失败: {str(e)}", exc_info=True)
+            logger.error(f"MA5检测失败: {e}", exc_info=True)
             return None
-    
+
+    # ─── mock ───
+
     def _get_mock_dbmf_price(self) -> float:
-        """生成模拟DBMF价格
-        
-        Returns:
-            float: 模拟的DBMF价格（25-35美元之间）
-        """
         import random
         return round(random.uniform(25.0, 35.0), 2)
-    
+
     def _get_mock_dbmf_historical_prices(self, period: str) -> List[float]:
-        """生成模拟DBMF历史价格序列
-        
-        Args:
-            period: 时间周期
-            
-        Returns:
-            list: 模拟的价格序列
-        """
         import random
-        
-        # 根据周期确定数据点数量
-        if 'd' in period:
-            days = int(period.replace('d', ''))
-        elif 'mo' in period:
-            days = int(period.replace('mo', '')) * 30
-        else:
-            days = 5
-        
-        # 生成带有随机波动的价格序列
-        base_price = 30.0
+        days_map = {'1d': 1, '5d': 5, '1mo': 22, '3mo': 66, '6mo': 132, '1y': 252}
+        days = days_map.get(period, 5)
+
+        base = 30.0
         prices = []
-        
-        for i in range(days):
-            # 模拟价格波动（±2%）
-            change = random.uniform(-0.02, 0.02)
-            base_price *= (1 + change)
-            prices.append(round(base_price, 2))
-        
+        for _ in range(days):
+            base *= (1 + random.uniform(-0.02, 0.02))
+            prices.append(round(base, 2))
         return prices
 
 
-# 便捷函数
 def create_dbmf_fetcher(mock_mode: bool = False) -> DBMFFetcher:
-    """创建DBMF数据获取器实例的工厂函数
-    
-    Args:
-        mock_mode: 是否启用Mock模式
-        
-    Returns:
-        DBMFFetcher: 配置好的获取器实例
-    """
     return DBMFFetcher(mock_mode=mock_mode)
