@@ -1,21 +1,25 @@
 """
-多源共振监控系统 - 主调度器
+[DEPRECATED] 多源共振监控系统 - 主调度器 (Pull 定时轮询模式)
 
-该模块负责管理所有定时任务，包括：
+⚠️ 该模块已被 data_stream 模块替代。
+新的 Push 架构使用 WebSocket + EventBus 实时推送，无需定时轮询。
+请使用 main_stream.py 或 StreamEngine 启动系统。
+
+新入口:
+    py main_stream.py
+
+或代码中:
+    from data_stream.stream_engine import StreamEngine
+    engine = StreamEngine()
+    engine.start()
+
+该文件保留用于向后兼容和回退。
+
+原功能:
 - 盘中高频任务（每5-15分钟执行）
 - 盘后批量任务（每日美东20:30执行）
 - 异常处理与优雅关闭
 - 任务依赖管理
-
-使用示例:
-    from main_scheduler import MainScheduler, create_and_start_scheduler
-    
-    # 方式1: 直接启动
-    create_and_start_scheduler()
-    
-    # 方式2: 手动控制
-    scheduler = MainScheduler()
-    scheduler.start()
 """
 
 import asyncio
@@ -31,7 +35,8 @@ from database.db_manager import DatabaseManager
 from data_fetchers import (
     TradierFetcher,  # 保留导入但不再用于 GEX (已替换为 SqueezeMetrics CSV)
     YahooFinanceFetcher,
-    CoinglassFetcher,  # 替代 CCXT: 全网聚合加密衍生品数据
+    HyperliquidFetcher,  # DEX 衍生品 (首选, 免费, 无API Key)
+    CCDataFetcher,  # CEX 衍生品 (降级备选, Free Tier 10万次/月)
     SqueezeMetricsFetcher,
     FMPFetcher,  # FMP 结构化短卖JSON (首选)
     FINRAFetcher,  # FINRA 管道文件 (降级备选)
@@ -81,7 +86,8 @@ class MainScheduler:
         # 初始化数据获取器
         self.tradier_fetcher = None  # GEX 已替换为 SqueezeMetrics CSV, 不再使用 Tradier
         self.yahoo_fetcher = YahooFinanceFetcher()
-        self.coinglass_fetcher = CoinglassFetcher()  # 替代 CCXT: 全网聚合数据
+        self.hyperliquid_fetcher = HyperliquidFetcher()  # DEX 衍生品 (首选, 完全免费)
+        self.ccdata_fetcher = CCDataFetcher()  # CEX 衍生品 (降级备选, 需API Key)
         self.squeezemetrics_fetcher = SqueezeMetricsFetcher()
         self.fmp_fetcher = FMPFetcher()  # FMP 结构化JSON (首选)
         self.finra_fetcher = FINRAFetcher()  # FINRA 管道文件 (降级备选)
@@ -371,28 +377,52 @@ class MainScheduler:
             self.fallback_manager.record_failure('task_analyze_vix')
     
     async def task_monitor_crypto(self):
-        """任务: 监控加密市场杠杆
+        """任务: 监控加密市场杠杆 (Hyperliquid DEX 优先 → CCData CEX 降级)
         
-        实时监控BTC永续合约资金费率和未平仓合约量，
-        检测杠杆清算风险。
+        实时监控 BTC 永续合约资金费率和未平仓合约量，
+        优先从 Hyperliquid DEX (免费, 无API Key) 获取，
+        失败时降级到 CCData CEX (需API Key)。
         """
         try:
-            logger.debug("开始执行加密市场监控任务")
+            logger.debug("开始执行加密市场监控任务 (Hyperliquid → CCData 降级链路)")
             loop = asyncio.get_event_loop()
             
+            funding_rate = None
+            current_oi = None
+            data_source = None
+            
+            # 第1步: 尝试 Hyperliquid DEX (免费, 完全开放)
             funding_rate = await loop.run_in_executor(
                 self.executor,
-                self.coinglass_fetcher.get_funding_rate,
+                self.hyperliquid_fetcher.get_funding_rate,
                 'BTC/USDT'
             )
             current_oi = await loop.run_in_executor(
                 self.executor,
-                self.coinglass_fetcher.get_open_interest,
+                self.hyperliquid_fetcher.get_open_interest,
                 'BTC/USDT'
             )
             
+            if funding_rate is not None and current_oi is not None:
+                data_source = 'Hyperliquid'
+                logger.info(f"Hyperliquid DEX 数据获取成功")
+            else:
+                # 第2步: 降级到 CCData CEX
+                logger.warning("Hyperliquid 数据不完整, 降级到 CCData")
+                funding_rate = await loop.run_in_executor(
+                    self.executor,
+                    self.ccdata_fetcher.get_funding_rate,
+                    'BTC/USDT'
+                )
+                current_oi = await loop.run_in_executor(
+                    self.executor,
+                    self.ccdata_fetcher.get_open_interest,
+                    'BTC/USDT'
+                )
+                data_source = 'CCData' if (funding_rate and current_oi) else None
+            
             if not funding_rate or not current_oi:
-                logger.warning("加密数据获取失败")
+                logger.warning("Hyperliquid 和 CCData 均获取加密数据失败")
                 self.fallback_manager.record_failure('task_monitor_crypto')
                 return
             
@@ -436,8 +466,8 @@ class MainScheduler:
             # 成功后重置失败计数
             self.fallback_manager.reset_failure_count('task_monitor_crypto')
             
-            logger.debug(
-                f"加密监控完成: Funding={funding_rate*100:.4f}%, "
+            logger.info(
+                f"加密监控完成 (源={data_source}): Funding={funding_rate*100:.4f}%, "
                 f"OI Change={oi_change['drop_percentage']:.1f}%, "
                 f"Anomaly={funding_anomaly}"
             )

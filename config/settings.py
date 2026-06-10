@@ -38,9 +38,19 @@ class Config:
     TRADIER_BASE_URL: str = 'https://api.tradier.com/v1'
     TRADIER_SANDBOX_URL: str = 'https://sandbox.tradier.com/v1'
     
-    # Coinglass API配置 (用于获取全网加密衍生品数据, 替代CCXT)
-    # 免费注册: https://coinglass.com/register
-    # Hobbyist套餐 $29/月, 免费套餐有限端点
+    # Hyperliquid DEX API (去中心化衍生品, 完全免费, 无需API Key, 不屏蔽美国IP)
+    # 目前最大的衍生品DEX, 交易量全球前三
+    # API完全开放: POST https://api.hyperliquid.xyz/info
+    HYPERLIQUID_BASE_URL: str = 'https://api.hyperliquid.xyz/info'
+    
+    # CCData (原 CryptoCompare) API配置 (CEX衍生品数据, Free Tier 10万次/月)
+    # 免费注册: https://developers.coindesk.com/
+    # 老牌加密数据商, 覆盖头部交易所 Funding Rate / OI / Liquidation
+    CCDATA_API_KEY: str = os.getenv('CCDATA_API_KEY', '')
+    CCDATA_BASE_URL: str = 'https://data-api.cryptocompare.com'
+    
+    # Coinglass API配置 (已弃用, 保留兼容)
+    # 原用于全网加密衍生品聚合, 已替换为 Hyperliquid + CCData 降级链路
     COINGLASS_API_KEY: str = os.getenv('COINGLASS_API_KEY', '')
     COINGLASS_BASE_URL: str = 'https://open-api-v4.coinglass.com'
     
@@ -75,16 +85,18 @@ class Config:
     # Discord Webhook配置 (可选)
     DISCORD_WEBHOOK_URL: str = os.getenv('DISCORD_WEBHOOK_URL', '')
     
-    # ==================== 抓取频率配置 ====================
+    # ==================== 抓取频率配置 (已弃用 Pull 模式, 保留兼容) ====================
+    # Push 架构已启用: WebSocket + EventBus 替代定时轮询
+    # 这些配置仅在 RESTPollScheduler 中作为轮询间隔使用
     
     # 盘中监控频率 (秒)
-    INTRADAY_FETCH_INTERVAL: int = 900  # 15分钟 = 900秒
+    INTRADAY_FETCH_INTERVAL: int = 900  # 15分钟 = 900秒 (deprecated: RESTPollScheduler 使用)
     
     # 盘后监控时间点 (小时, 分钟)
-    AFTER_HOURS_FETCH_TIME: tuple = (20, 30)  # 20:30
+    AFTER_HOURS_FETCH_TIME: tuple = (20, 30)  # 20:30 (deprecated)
     
     # 开盘前准备时间 (分钟)
-    PRE_MARKET_PREP_MINUTES: int = 30
+    PRE_MARKET_PREP_MINUTES: int = 30  # deprecated
     
     # ==================== 信号阈值配置 ====================
     
@@ -222,8 +234,13 @@ class Config:
         if not cls.SQUEEZEMETRICS_API_KEY:
             warnings.append("SQUEEZEMETRICS_API_KEY未配置,暗盘指标将通过公开CSV免费获取(已内置支持)")
         
+        if not cls.CCDATA_API_KEY:
+            warnings.append("CCDATA_API_KEY未配置,加密数据将依赖Hyperliquid DEX (CCData Free Tier 10万次/月)")
+        else:
+            warnings.append(f"CCData API Key已配置(...{cls.CCDATA_API_KEY[-6:]}), CEX衍生品数据可用")
+        
         if not cls.COINGLASS_API_KEY:
-            warnings.append("COINGLASS_API_KEY未配置,加密数据将使用Mock模式(Coinglass Hobbyist $29/月)")
+            warnings.append("COINGLASS_API_KEY未配置 (已弃用, 保留兼容)")
         
         if not cls.FMP_API_KEY:
             warnings.append("FMP_API_KEY未配置,短卖数据将降级到FINRA管道文件(FMP Free Tier 250 req/day)")
@@ -297,6 +314,30 @@ class Config:
         return next_time.isoformat()
 
 
+class StreamConfig:
+    """Push 实时流架构配置
+    
+    WebSocket 连接、自动重连、Ping 保活等参数。
+    """
+    
+    # Hyperliquid WebSocket
+    HYPERLIQUID_WS_URL: str = "wss://api.hyperliquid.xyz/ws"
+    
+    # 自动重连参数 (指数退避)
+    WS_RECONNECT_MIN_DELAY: int = 1     # 秒
+    WS_RECONNECT_MAX_DELAY: int = 60    # 秒
+    
+    # Ping 保活
+    WS_PING_INTERVAL: int = 30          # 秒
+    
+    # REST 轮询间隔 (非WS源)
+    REST_POLL_INTERVAL_INTRADAY: int = 900   # 盘中 15分钟
+    REST_POLL_INTERVAL_CRYPTO: int = 60      # 加密降级轮询 1分钟
+    
+    # 共振评分防抖间隔
+    EVAL_COOLDOWN_SECONDS: int = 30
+
+
 class DataFetchConfig:
     """数据获取层静态端点与选择器配置
     
@@ -304,8 +345,11 @@ class DataFetchConfig:
     网站改版或API变更时只需修改此处，无需改动业务代码。
     """
     
-    # ChartExchange 经过验证的端点配置 (已弃用, 保留兼容)
-    CHARTEXCHANGE_API = "https://chartexchange.com/api/short-volume/data/{symbol}/"
+    # Hyperliquid DEX 端点 (去中心化衍生品, 完全免费)
+    HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
+    
+    # CCData Futures 端点 (CEX衍生品, Free Tier 10万次/月)
+    CCDATA_FUTURES_URL = "https://data-api.cryptocompare.com/futures/v1"
     
     # FMP 结构化 JSON API (短卖数据首选，省去管道文件解析)
     # 端点: /api/v4/short_volume?symbol={SYMBOL}&apikey={KEY}
