@@ -1,25 +1,34 @@
 """
-多源共振监控系统 - Yahoo Finance VIX期货数据获取器
+多源共振监控系统 - Yahoo Finance 数据获取器
 
-该模块负责从Yahoo Finance API获取VIX现货和期货价格数据，
-用于计算波动率期限结构和分析市场恐慌程度。
+该模块负责从Yahoo Finance获取VIX现货/期货价格和做空数据，
+用于计算波动率期限结构、市场恐慌程度和量化选股过滤。
 
 主要功能:
 - 获取VIX现货指数价格 (^VIX)
 - 获取VIX近月和次月期货价格 (VX=F, VX2=F)
 - 计算VIX期限结构比率 (VX1/VX2)
 - 判断Contango/Backwardation市场状态
+- 获取做空数据 (shortPercentOfFloat / shortRatio / sharesShort) — yfinance库
 
 API端点: https://query1.finance.yahoo.com/v8/finance/chart/{symbol}
+做空数据: yfinance.Ticker(symbol).info (免费, 无API Key, 覆盖美股全量标的)
 """
 
 import requests
 from requests.exceptions import Timeout, ConnectionError, HTTPError
-from typing import Optional
+from typing import Optional, Dict, Any
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from utils.logger import getLogger
 from utils.exceptions import DataFetchError
 from config.settings import Config
+
+try:
+    import yfinance as yf
+    _YFINANCE_AVAILABLE = True
+except ImportError:
+    _YFINANCE_AVAILABLE = False
+    yf = None
 
 logger = getLogger('yahoo_finance_fetcher')
 
@@ -295,6 +304,93 @@ class YahooFinanceFetcher:
             base_price += random.uniform(0.5, 2.0)
         
         return round(base_price, 2)
+    
+    # ================================================================
+    # 做空数据 (yfinance — 替代已删除的 FMP)
+    # ================================================================
+    
+    def get_short_interest(self, symbol: str = 'SPY') -> Optional[Dict[str, Any]]:
+        """获取标的做空数据 (yfinance Ticker.info)
+        
+        使用 yfinance 库直接从 Yahoo Finance 提取做空指标:
+        - shortPercentOfFloat: 做空股数占流通股比例 (%)
+        - shortRatio: 做空比率 (days to cover)
+        - sharesShort: 做空总股数
+        - priorMonthShort: 上个月做空股数
+        
+        优势: 免费, 无需API Key, 覆盖美股全量标的, 接口轻量。
+        替代已删除的 FMP (Financial Modeling Prep) 短卖数据获取。
+        
+        Args:
+            symbol: 标的股票代码, 如 'SPY', 'AAPL', 'TSLA'
+        
+        Returns:
+            dict: {
+                'symbol': str,
+                'short_pct_float': float | None,  # 做空占流通股比例 (%)
+                'short_ratio': float | None,       # 做空比率 (天)
+                'shares_short': int | None,        # 做空总股数
+                'date': str | None,                # 数据日期
+            }
+            yfinance 不可用或获取失败时返回 None
+        """
+        if not _YFINANCE_AVAILABLE:
+            logger.warning("yfinance 库未安装, 无法获取做空数据")
+            return None
+        
+        if self.mock_mode:
+            logger.warning(f"Mock模式: 返回模拟 {symbol} 做空数据")
+            return self._get_mock_short_interest(symbol)
+        
+        try:
+            logger.info(f"获取 {symbol} 做空数据 (yfinance)")
+            ticker = yf.Ticker(symbol.upper())
+            info = ticker.info
+            
+            if not info or info.get('regularMarketPrice') is None:
+                logger.warning(f"{symbol} yfinance info 为空或无效")
+                return None
+            
+            short_pct = info.get('shortPercentOfFloat')
+            short_ratio = info.get('shortRatio')
+            shares_short = info.get('sharesShort')
+            date_short = info.get('dateShortInterest')
+            
+            # 至少有一个非None字段才返回
+            if short_pct is None and shares_short is None:
+                logger.debug(f"{symbol} 无做空数据 (可能为ETF或数据延迟)")
+                return None
+            
+            result = {
+                'symbol': symbol.upper(),
+                'short_pct_float': float(short_pct) if short_pct is not None else None,
+                'short_ratio': float(short_ratio) if short_ratio is not None else None,
+                'shares_short': int(shares_short) if shares_short is not None else None,
+                'date': str(date_short) if date_short else None,
+            }
+            
+            logger.info(
+                f"{symbol} 做空数据: short%={result['short_pct_float']}, "
+                f"ratio={result['short_ratio']}d, shares={result['shares_short']}"
+            )
+            return result
+            
+        except Exception as e:
+            logger.error(f"{symbol} 做空数据获取失败: {e}")
+            return None
+    
+    def _get_mock_short_interest(self, symbol: str) -> Dict[str, Any]:
+        """生成模拟做空数据"""
+        import random
+        from datetime import datetime
+        
+        return {
+            'symbol': symbol.upper(),
+            'short_pct_float': round(random.uniform(0.5, 15.0), 2),
+            'short_ratio': round(random.uniform(1.0, 8.0), 2),
+            'shares_short': random.randint(1000000, 50000000),
+            'date': datetime.now().strftime('%Y-%m-%d'),
+        }
 
 
 # 便捷函数

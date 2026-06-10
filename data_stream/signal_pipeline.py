@@ -542,7 +542,7 @@ class SignalPipeline:
             # 暗盘评分 (支持降级)
             available_sources = {
                 'dix': False,  # SqueezeMetrics CSV
-                'short_ratio': True,  # FMP/FINRA
+                'short_ratio': True,  # yfinance/FINRA
                 'stockgrid': True,  # AXLFI
             }
             darkpool_score = await loop.run_in_executor(

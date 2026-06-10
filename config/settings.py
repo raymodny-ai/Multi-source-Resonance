@@ -54,12 +54,9 @@ class Config:
     COINGLASS_API_KEY: str = os.getenv('COINGLASS_API_KEY', '')
     COINGLASS_BASE_URL: str = 'https://open-api-v4.coinglass.com'
     
-    # FMP (Financial Modeling Prep) API配置 (结构化短卖+场外交易量JSON API)
-    # 免费注册: https://site.financialmodelingprep.com/register
-    # Free Tier: 250 requests/day, Starter $19/月
-    # 优势: JSON直出shortVolume/totalVolume, 省去FINRA管道文件解析
-    FMP_API_KEY: str = os.getenv('FMP_API_KEY', '')
-    FMP_BASE_URL: str = 'https://financialmodelingprep.com'
+    # yfinance 做空数据 (免费, 无需API Key, 替代已删除的FMP)
+    # 通过 yfinance.Ticker(symbol).info 获取 shortPercentOfFloat / shortRatio / sharesShort
+    # 无需额外配置, yfinance 已在 requirements.txt 中
     
     # SqueezeMetrics API配置 (用于获取DIX/GEX指标)
     SQUEEZEMETRICS_API_KEY: str = os.getenv('SQUEEZEMETRICS_API_KEY', '')
@@ -242,10 +239,12 @@ class Config:
         if not cls.COINGLASS_API_KEY:
             warnings.append("COINGLASS_API_KEY未配置 (已弃用, 保留兼容)")
         
-        if not cls.FMP_API_KEY:
-            warnings.append("FMP_API_KEY未配置,短卖数据将降级到FINRA管道文件(FMP Free Tier 250 req/day)")
-        else:
-            warnings.append(f"FMP API Key已配置(...{cls.FMP_API_KEY[-6:]}), 优先使用结构化JSON获取短卖数据")
+        # yfinance 做空数据 (免费, 无需API Key)
+        try:
+            import yfinance
+            warnings.append("yfinance 库可用, 做空数据获取就绪 (shortPercentOfFloat/shortRatio/sharesShort)")
+        except ImportError:
+            warnings.append("yfinance 库未安装, 做空数据获取将失败 (请 pip install yfinance)")
         
         # 检查通知配置 (至少需要一种通知方式)
         if not cls.EMAIL_RECIPIENTS and not cls.TELEGRAM_BOT_TOKEN:
@@ -350,10 +349,6 @@ class DataFetchConfig:
     
     # CCData Futures 端点 (CEX衍生品, Free Tier 10万次/月)
     CCDATA_FUTURES_URL = "https://data-api.cryptocompare.com/futures/v1"
-    
-    # FMP 结构化 JSON API (短卖数据首选，省去管道文件解析)
-    # 端点: /api/v4/short_volume?symbol={SYMBOL}&apikey={KEY}
-    FMP_SHORT_VOLUME_URL = "https://financialmodelingprep.com/api/v4/short_volume"
     
     # FINRA 官方每日短卖量文件 (降级备选)
     # 每日美东16:00后更新, 管道分隔格式: Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market

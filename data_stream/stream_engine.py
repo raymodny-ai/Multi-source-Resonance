@@ -10,7 +10,7 @@
       ├─ HyperliquidStream (WebSocket → crypto.funding_rate / crypto.open_interest)
       ├─ RESTPollScheduler (asyncio.sleep → gex / vix / axlfi / dbmf)
       ├─ SignalPipeline (订阅 EventBus → 评分 → 告警)
-      └─ 盘后任务 (短卖比 FMP→FINRA 降级)
+      └─ 盘后任务 (短卖比 yfinance→FINRA 降级)
 
 使用示例:
     from data_stream.stream_engine import StreamEngine

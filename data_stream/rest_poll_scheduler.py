@@ -2,7 +2,7 @@
 多源共振监控系统 - REST 轮询调度器 (轻量级, 替代 APScheduler)
 
 处理不支持 WebSocket 的数据源 (SqueezeMetrics GEX, Yahoo VIX,
-AXLFI 暗盘, DBMF, FMP/FINRA 短卖比)。
+AXLFI 暗盘, DBMF, FINRA 短卖比)。
 
 与旧 Pull 架构的对比:
     旧: APScheduler cron jobs → 固定时刻执行
@@ -61,10 +61,9 @@ class RESTPollScheduler:
 
         # 延迟导入数据获取器 (避免循环依赖)
         self._squeezemetrics = None
-        self._yahoo = None
+        self._yahoo = None  # VIX + 做空数据 (yfinance, 替代已删除FMP)
         self._axlfi = None
         self._dbmf = None
-        self._fmp = None
         self._finra = None
 
         logger.info("RESTPollScheduler 初始化完成")
@@ -114,14 +113,12 @@ class RESTPollScheduler:
         """延迟加载数据获取器实例"""
         try:
             from data_fetchers import SqueezeMetricsFetcher, YahooFinanceFetcher
-            from data_fetchers import FMPFetcher, FINRAFetcher, DBMFFetcher
+            from data_fetchers import FINRAFetcher, DBMFFetcher
             from data_fetchers.axlfi_fetcher import AxlfiFetcher
 
-            self._squeezemetrics = SqueezeMetricsFetcher()
-            self._yahoo = YahooFinanceFetcher()
+            self._yahoo = YahooFinanceFetcher()  # VIX + 做空数据 (yfinance)
             self._axlfi = AxlfiFetcher()
             self._dbmf = DBMFFetcher()
-            self._fmp = FMPFetcher()
             self._finra = FINRAFetcher()
             logger.debug("数据获取器延迟加载完成")
         except Exception as e:
@@ -324,7 +321,8 @@ class RESTPollScheduler:
                             'timestamp': datetime.now(),
                         })
 
-                        # 同时发布短卖比数据 (如果 FMP 还未推送)
+                        # 同时发布短卖比数据 (如果 yfinance 还未推送)
+                        # 注: yfinance 做空数据已在 run_afterhours_short_volume() 中获取
                         if latest_short_pct > 0:
                             await self._bus.publish(Topics.SHORT_VOLUME_SPY, {
                                 'ratio': latest_short_pct,
@@ -414,37 +412,33 @@ class RESTPollScheduler:
                 await asyncio.sleep(60)
 
     # ================================================================
-    # 盘后任务: 短卖比 (FMP → FINRA)
+    # 盘后任务: 做空数据 (yfinance → FINRA)
     # ================================================================
 
     async def run_afterhours_short_volume(self) -> None:
-        """盘后获取短卖比数据 (FMP → FINRA 降级链路)
+        """盘后获取做空数据 (yfinance → FINRA 降级链路)
 
-        一次性执行: FMP JSON 优先, 失败则降级 FINRA 管道文件。
+        一次性执行: yfinance short interest 优先, 失败则降级 FINRA 管道文件。
         结果发布到 EventBus Topics.SHORT_VOLUME_SPY
         """
-        logger.info("盘后短卖比任务启动 (FMP → FINRA 降级)")
+        logger.info("盘后做空数据任务启动 (yfinance → FINRA 降级)")
         try:
             loop = asyncio.get_event_loop()
             short_ratio = None
             data_source = None
 
-            # 第1步: FMP 结构化 JSON
-            spy_data = await loop.run_in_executor(
+            # 第1步: yfinance 做空数据 (免费, 无API Key)
+            short_data = await loop.run_in_executor(
                 self._executor,
-                lambda: self._fmp.fetch_short_volume_data('SPY'),
+                lambda: self._yahoo.get_short_interest('SPY'),
             )
 
-            if spy_data:
-                short_ratio = await loop.run_in_executor(
-                    self._executor,
-                    self._fmp.calculate_off_exchange_short_ratio,
-                    spy_data,
-                )
-                data_source = 'FMP'
+            if short_data and short_data.get('short_pct_float') is not None:
+                short_ratio = short_data['short_pct_float']
+                data_source = 'yfinance'
             else:
                 # 第2步: 降级 FINRA 管道文件
-                logger.warning("FMP 失败, 降级到 FINRA")
+                logger.warning("yfinance 做空数据失败, 降级到 FINRA")
                 spy_data = await loop.run_in_executor(
                     self._executor,
                     lambda: self._finra.fetch_short_volume_data('SPY'),
@@ -464,10 +458,10 @@ class RESTPollScheduler:
                     'timestamp': datetime.now(),
                 })
                 logger.info(
-                    f"盘后短卖比: {short_ratio:.1f}% (源={data_source})"
+                    f"盘后做空数据: {short_ratio:.1f}% (源={data_source})"
                 )
             else:
-                logger.warning("FMP 和 FINRA 均获取短卖数据失败")
+                logger.warning("yfinance 和 FINRA 均获取做空数据失败")
 
         except Exception as e:
-            logger.error(f"盘后短卖比任务失败: {e}", exc_info=True)
+            logger.error(f"盘后做空数据任务失败: {e}", exc_info=True)

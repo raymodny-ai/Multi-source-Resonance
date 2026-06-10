@@ -8,8 +8,8 @@
 - Hyperliquid DEX (去中心化衍生品, 完全免费, 首选)
 - CCData API (CEX衍生品, Free Tier, 降级备选)
 - SqueezeMetrics CSV (DIX/GEX指标, 免费公开)
-- FMP API (结构化短卖JSON, 首选, 替代ChartExchange)
 - FINRA 官方短卖文件 (管道分隔文件降级备选)
+- yfinance 做空数据 (shortPercentOfFloat/shortRatio/sharesShort, 免费首选)
 - AXLFI 公开API (暗盘净头寸, 替代Stockgrid)
 
 主要类:
@@ -19,7 +19,6 @@
     HyperliquidFetcher: Hyperliquid DEX 衍生品获取器 (首选, 免费)
     CCDataFetcher: CCData CEX 衍生品获取器 (降级备选)
     SqueezeMetricsFetcher: SqueezeMetrics DIX/GEX获取器
-    FMPFetcher: FMP结构化短卖JSON获取器 (首选)
     FINRAFetcher: FINRA官方场外卖空数据获取器 (降级备选)
     StockgridFetcher: Stockgrid暗盘净头寸爬虫 (已弃用)
     DBMFFetcher: DBMF ETF动量监控获取器
@@ -31,7 +30,6 @@ from data_fetchers.coinglass_fetcher import CoinglassFetcher, create_coinglass_f
 from data_fetchers.hyperliquid_fetcher import HyperliquidFetcher, create_hyperliquid_fetcher
 from data_fetchers.ccdata_fetcher import CCDataFetcher, create_ccdata_fetcher
 from data_fetchers.squeezemetrics_fetcher import SqueezeMetricsFetcher, create_squeezemetrics_fetcher
-from data_fetchers.fmp_fetcher import FMPFetcher, create_fmp_fetcher
 from data_fetchers.finra_fetcher import FINRAFetcher, create_finra_fetcher
 from data_fetchers.stockgrid_fetcher import StockgridFetcher, create_stockgrid_fetcher
 from data_fetchers.dbmf_fetcher import DBMFFetcher, create_dbmf_fetcher
@@ -49,8 +47,6 @@ __all__ = [
     'create_ccdata_fetcher',
     'SqueezeMetricsFetcher',
     'create_squeezemetrics_fetcher',
-    'FMPFetcher',
-    'create_fmp_fetcher',
     'FINRAFetcher',
     'create_finra_fetcher',
     'StockgridFetcher',

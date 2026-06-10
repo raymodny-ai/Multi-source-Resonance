@@ -34,11 +34,10 @@ from config.settings import Config
 from database.db_manager import DatabaseManager
 from data_fetchers import (
     TradierFetcher,  # 保留导入但不再用于 GEX (已替换为 SqueezeMetrics CSV)
-    YahooFinanceFetcher,
+    YahooFinanceFetcher,  # VIX + 做空数据 (yfinance shortPercentOfFloat/shortRatio/sharesShort)
     HyperliquidFetcher,  # DEX 衍生品 (首选, 免费, 无API Key)
     CCDataFetcher,  # CEX 衍生品 (降级备选, Free Tier 10万次/月)
     SqueezeMetricsFetcher,
-    FMPFetcher,  # FMP 结构化短卖JSON (首选)
     FINRAFetcher,  # FINRA 管道文件 (降级备选)
     DBMFFetcher
 )
@@ -85,11 +84,10 @@ class MainScheduler:
         
         # 初始化数据获取器
         self.tradier_fetcher = None  # GEX 已替换为 SqueezeMetrics CSV, 不再使用 Tradier
-        self.yahoo_fetcher = YahooFinanceFetcher()
+        self.yahoo_fetcher = YahooFinanceFetcher()  # VIX + 做空数据 (yfinance)
         self.hyperliquid_fetcher = HyperliquidFetcher()  # DEX 衍生品 (首选, 完全免费)
         self.ccdata_fetcher = CCDataFetcher()  # CEX 衍生品 (降级备选, 需API Key)
         self.squeezemetrics_fetcher = SqueezeMetricsFetcher()
-        self.fmp_fetcher = FMPFetcher()  # FMP 结构化JSON (首选)
         self.finra_fetcher = FINRAFetcher()  # FINRA 管道文件 (降级备选)
         self.axlfi_fetcher = AxlfiFetcher()  # AXLFI 公开API替代已下线Stockgrid
         self.dbmf_fetcher = DBMFFetcher()
@@ -209,12 +207,12 @@ class MainScheduler:
         
         # 任务2: 抓取ChartExchange卖空比 (美东20:35)
         self.scheduler.add_job(
-            self.task_fetch_chartexchange,
+            self.task_fetch_short_volume,
             trigger='cron',
             hour='20',
             minute='35',
-            id='fetch_chartexchange',
-            name='抓取ChartExchange数据',
+            id='fetch_short_volume',
+            name='获取做空数据',
             misfire_grace_time=3600
         )
         
@@ -764,36 +762,32 @@ class MainScheduler:
             logger.error(f"DIX获取任务失败: {e}", exc_info=True)
             self.fallback_manager.record_failure('task_fetch_dix')
     
-    async def task_fetch_chartexchange(self):
-        """任务: 获取短卖数据 (FMP JSON优先 → FINRA管道文件降级)
+    async def task_fetch_short_volume(self):
+        """任务: 获取做空数据 (yfinance short interest → FINRA 管道文件降级)
         
-        盘后获取场外短卖成交量占比，优先使用 FMP 结构化JSON API，
-        失败或API Key未配置时自动降级到 FINRA 官方管道分隔文件。
+        盘后获取做空数据，优先使用 yfinance (shortPercentOfFloat/shortRatio/sharesShort)，
+        失败时降级到 FINRA 管道文件获取场外短卖比。
         """
         try:
-            logger.info("开始执行短卖数据获取任务 (FMP → FINRA 降级链路)")
+            logger.info("开始执行做空数据获取任务 (yfinance → FINRA 降级链路)")
             loop = asyncio.get_event_loop()
             
             short_ratio = None
             data_source = None
             
-            # 第1步: 尝试 FMP 结构化 JSON (首选)
-            spy_data = await loop.run_in_executor(
+            # 第1步: yfinance 做空数据 (免费, 无API Key)
+            short_data = await loop.run_in_executor(
                 self.executor,
-                lambda: self.fmp_fetcher.fetch_short_volume_data('SPY')
+                lambda: self.yahoo_fetcher.get_short_interest('SPY')
             )
             
-            if spy_data:
-                logger.info("FMP 数据获取成功，计算短卖比例")
-                short_ratio = await loop.run_in_executor(
-                    self.executor,
-                    self.fmp_fetcher.calculate_off_exchange_short_ratio,
-                    spy_data
-                )
-                data_source = 'FMP'
+            if short_data and short_data.get('short_pct_float') is not None:
+                short_ratio = short_data['short_pct_float']
+                data_source = 'yfinance'
+                logger.info(f"yfinance 做空数据获取成功: {short_ratio:.2f}%")
             else:
                 # 第2步: 降级到 FINRA 管道分隔文件
-                logger.warning("FMP 数据获取失败，降级到 FINRA 管道文件")
+                logger.warning("yfinance 做空数据获取失败，降级到 FINRA 管道文件")
                 spy_data = await loop.run_in_executor(
                     self.executor,
                     lambda: self.finra_fetcher.fetch_short_volume_data('SPY')
@@ -807,9 +801,9 @@ class MainScheduler:
                     )
                     data_source = 'FINRA'
             
-            if not spy_data or short_ratio is None:
-                logger.warning("FMP和FINRA均获取短卖数据失败")
-                self.fallback_manager.record_failure('task_fetch_chartexchange')
+            if short_ratio is None:
+                logger.warning("yfinance 和 FINRA 均获取做空数据失败")
+                self.fallback_manager.record_failure('task_fetch_short_volume')
                 return
             
             today = datetime.now(pytz.timezone('US/Eastern')).date()
@@ -823,15 +817,15 @@ class MainScheduler:
             )
             
             # 成功后重置失败计数
-            self.fallback_manager.reset_failure_count('task_fetch_chartexchange')
+            self.fallback_manager.reset_failure_count('task_fetch_short_volume')
             
             logger.info(
-                f"短卖数据获取完成 (源={data_source}): Short Ratio={short_ratio:.1f}%"
+                f"做空数据获取完成 (源={data_source}): Short={short_ratio:.1f}%"
             )
             
         except Exception as e:
-            logger.error(f"短卖数据获取任务失败: {e}", exc_info=True)
-            self.fallback_manager.record_failure('task_fetch_chartexchange')
+            logger.error(f"做空数据获取任务失败: {e}", exc_info=True)
+            self.fallback_manager.record_failure('task_fetch_short_volume')
     
     async def task_fetch_stockgrid(self):
         """任务: 获取AXLFI暗盘净头寸
