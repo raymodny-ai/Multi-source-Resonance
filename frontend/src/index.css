@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+/* ===== 深色主题配色方案 (PRD §6.5) ===== */
+:root {
+  --bg-primary: #0f172a;
+  --bg-card: #1e293b;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --accent-green: #22c55e;
+  --accent-yellow: #eab308;
+  --accent-red: #ef4444;
+  --accent-blue: #3b82f6;
+  --border: #334155;
+  --stale-overlay: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 5px,
+    rgba(148, 163, 184, 0.1) 5px,
+    rgba(148, 163, 184, 0.1) 10px
+  );
+}
+
+/* ===== 全局深色主题默认样式 ===== */
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ===== 滚动条深色样式 ===== */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* ===== 数据陈旧度视觉样式 (PRD §6.7) ===== */
+.stale-warn {
+  border: 1px solid var(--accent-yellow) !important;
+  opacity: 0.85;
+}
+
+.stale-card {
+  opacity: 0.45;
+  filter: grayscale(0.6);
+  background: var(--stale-overlay);
+  position: relative;
+}
+.stale-card::after {
+  content: attr(data-stale-label);
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+.disconnected {
+  opacity: 0.3;
+  filter: grayscale(1);
+}
+
+/* ===== 脉冲动画 (LEVEL 3 告警) ===== */
+@keyframes pulse-border {
+  0%, 100% { border-color: var(--accent-red); }
+  50% { border-color: transparent; }
+}
+.pulse-alert {
+  animation: pulse-border 1.5s ease-in-out infinite;
+  border-width: 2px;
+  border-style: solid;
+}
+
+/* ===== 骨架屏动画 ===== */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 4px;
+}
