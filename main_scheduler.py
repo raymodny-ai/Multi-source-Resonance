@@ -34,9 +34,9 @@ from data_fetchers import (
     CCXTFetcher,
     SqueezeMetricsFetcher,
     ChartExchangeFetcher,
-    StockgridFetcher,
     DBMFFetcher
 )
+from data_fetchers.axlfi_fetcher import AxlfiFetcher
 from quant_logic import (
     GEXCalculator,
     VIXAnalyzer,
@@ -83,7 +83,7 @@ class MainScheduler:
         self.ccxt_fetcher = CCXTFetcher()
         self.squeezemetrics_fetcher = SqueezeMetricsFetcher()
         self.chartexchange_fetcher = ChartExchangeFetcher()  # API密钥从config自动读取
-        self.stockgrid_fetcher = StockgridFetcher()
+        self.axlfi_fetcher = AxlfiFetcher()  # AXLFI 公开API替代已下线Stockgrid
         self.dbmf_fetcher = DBMFFetcher()
         
         # 初始化工具类
@@ -820,36 +820,45 @@ class MainScheduler:
             self.fallback_manager.record_failure('task_fetch_chartexchange')
     
     async def task_fetch_stockgrid(self):
-        """任务: 抓取Stockgrid净头寸
+        """任务: 获取AXLFI暗盘净头寸
         
-        使用Playwright抓取Stockgrid网站的机构净头寸数据，
-        检测底背离信号。
+        使用axlfi.com公开API获取真实暗盘净头寸和卖空数据，
+        检测底背离信号（替代已下线Stockgrid）。
         """
         try:
-            logger.info("开始执行Stockgrid抓取任务")
+            logger.info("开始执行AXLFI暗盘数据获取")
             loop = asyncio.get_event_loop()
-            
-            net_position = await loop.run_in_executor(
+
+            # 获取完整数据（暗盘净头寸 + 价格）
+            symbol_data = await loop.run_in_executor(
                 self.executor,
-                lambda: self.stockgrid_fetcher.scrape_net_position_history('SPY', [20, 60, 120])
+                lambda: self.axlfi_fetcher.fetch_symbol_data('SPY', 120)
             )
-            
-            if not net_position:
-                logger.warning("Stockgrid数据获取失败")
+
+            if not symbol_data:
+                logger.warning("AXLFI数据获取失败")
                 self.fallback_manager.record_failure('task_fetch_stockgrid')
                 return
-            
-            # 检测底背离
+
+            dp_position = symbol_data.get('dollar_dp_position', [])
+            close_prices = symbol_data.get('close', [])
+
+            if len(dp_position) < 60:
+                logger.warning(f"AXLFI数据点不足: {len(dp_position)}个")
+                self.fallback_manager.record_failure('task_fetch_stockgrid')
+                return
+
+            # 检测底背离（使用真实价格序列）
             divergence_result = await loop.run_in_executor(
                 self.executor,
-                lambda: self.stockgrid_fetcher.detect_bottom_divergence(
-                    net_position.get('20d', []),
-                    []
+                lambda: self.axlfi_fetcher.detect_bottom_divergence(
+                    dp_position[-120:] if len(dp_position) >= 120 else dp_position,
+                    close_prices[-120:] if close_prices and len(close_prices) >= 120 else dp_position[-120:]
                 )
             )
-            
+
             today = datetime.now(pytz.timezone('US/Eastern')).date()
-            
+
             # 验证信号
             confirmed_signal = await loop.run_in_executor(
                 self.executor,
@@ -859,23 +868,38 @@ class MainScheduler:
                     divergence_result.get('slope_60d', 0)
                 )
             )
-            
+
+            # 获取最新卖空指标
+            latest_dp = symbol_data.get('dollar_dp_position', [])[-1] if dp_position else 0
+            short_pct_list = symbol_data.get('short_volume_pct', [])
+            latest_short_pct = short_pct_list[-1] if short_pct_list else 0
+
             # 更新暗盘指标
             await loop.run_in_executor(
                 self.db_executor,
                 self.db.insert_dark_pool_metrics,
                 today,
-                None, None, divergence_result.get('slope_20d'), divergence_result.get('slope_60d'),
-                divergence_result.get('divergence', False), False, False, False, confirmed_signal, False
+                latest_dp / 1e9 if latest_dp else 0,  # 转为十亿美元
+                latest_short_pct,
+                divergence_result.get('slope_20d', 0),
+                divergence_result.get('slope_60d', 0),
+                divergence_result.get('divergence', False),
+                False, False, False, confirmed_signal,
+                divergence_result.get('golden_cross', False)
             )
-            
+
             # 成功后重置失败计数
             self.fallback_manager.reset_failure_count('task_fetch_stockgrid')
-            
-            logger.info(f"Stockgrid抓取完成: 20d Slope={divergence_result.get('slope_20d', 0):.4f}")
-            
+
+            logger.info(
+                f"AXLFI暗盘获取完成: DP=¥{latest_dp:,.0f}, "
+                f"20d Slope={divergence_result.get('slope_20d', 0):.2f}, "
+                f"Divergence={divergence_result.get('divergence')}, "
+                f"Golden Cross={divergence_result.get('golden_cross')}"
+            )
+
         except Exception as e:
-            logger.error(f"Stockgrid抓取任务失败: {e}", exc_info=True)
+            logger.error(f"AXLFI暗盘任务失败: {e}", exc_info=True)
             self.fallback_manager.record_failure('task_fetch_stockgrid')
     
     async def task_update_alpha(self):
