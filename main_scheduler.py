@@ -29,7 +29,7 @@ from utils.logger import getLogger
 from config.settings import Config
 from database.db_manager import DatabaseManager
 from data_fetchers import (
-    TradierFetcher,
+    TradierFetcher,  # 保留导入但不再用于 GEX (已替换为 SqueezeMetrics CSV)
     YahooFinanceFetcher,
     CCXTFetcher,
     SqueezeMetricsFetcher,
@@ -78,7 +78,7 @@ class MainScheduler:
         self.db_executor = ThreadPoolExecutor(max_workers=2)
         
         # 初始化数据获取器
-        self.tradier_fetcher = TradierFetcher()
+        self.tradier_fetcher = None  # GEX 已替换为 SqueezeMetrics CSV, 不再使用 Tradier
         self.yahoo_fetcher = YahooFinanceFetcher()
         self.ccxt_fetcher = CCXTFetcher()
         self.squeezemetrics_fetcher = SqueezeMetricsFetcher()
@@ -106,7 +106,7 @@ class MainScheduler:
         """设置盘中高频任务(美东时间9:30-16:00,每15分钟执行)
         
         注册5个盘中监控任务:
-        - GEX计算: 拉取Tradier期权链并计算Gamma敞口
+        - GEX+DIX: 从 SqueezeMetrics 公开 CSV 直接获取 (替代 Tradier)
         - VIX分析: 获取VIX期货并分析期限结构
         - 加密监控: 监控BTC资金费率和持仓量变化
         - DBMF检测: 检查DBMF ETF均线收复信号
@@ -246,99 +246,56 @@ class MainScheduler:
         logger.info("盘后批量任务设置完成(共5个)")
     
     async def task_calculate_gex(self):
-        """任务: 计算GEX敞口
+        """任务: 获取 SqueezeMetrics GEX+DIX 指标
         
-        从Tradier获取期权链数据，计算Gamma Exposure，
-        识别Flip Zone和Put Wall关键价位。
+        从 SqueezeMetrics 公开 CSV 直接获取 GEX 和 DIX，无需 Tradier API。
+        DIX.csv 每日更新，包含 SPX 价格 + DIX + GEX 三列。
         """
         try:
-            logger.debug("开始执行GEX计算任务")
+            logger.debug("开始执行 SQZ GEX+DIX 获取")
             loop = asyncio.get_event_loop()
-            
-            # 获取当前日期和下一个周五的期权到期日
-            today = datetime.now(pytz.timezone('US/Eastern'))
-            expiry_date = self._get_next_friday_expiry(today)
-            
-            # 获取期权链 - 通过线程池执行同步方法
-            option_chain = await loop.run_in_executor(
+
+            # 从 SqueezeMetrics CSV 获取完整指标 (一次请求，免费)
+            metrics = await loop.run_in_executor(
                 self.executor,
-                self.tradier_fetcher.get_option_chain,
-                'SPY',
-                expiry_date
+                self.squeezemetrics_fetcher.get_full_metrics
             )
-            if not option_chain:
-                logger.warning("期权链获取失败,跳过本轮GEX计算")
+
+            if not metrics:
+                logger.warning("SqueezeMetrics 数据获取失败")
                 self.fallback_manager.record_failure('task_calculate_gex')
                 return
-            
-            # 获取当前价格 - 通过线程池执行同步方法
-            spot_price = await loop.run_in_executor(
-                self.executor,
-                self.yahoo_fetcher.get_spy_price
-            )
-            if not spot_price:
-                logger.warning("SPY价格获取失败,跳过GEX计算")
-                self.fallback_manager.record_failure('task_calculate_gex')
-                return
-            
-            # GEX计算是CPU密集型,也在executor中执行
-            gex_result = await loop.run_in_executor(
-                self.executor,
-                self.gex_calculator.calculate_portfolio_gex,
-                option_chain,
-                spot_price
-            )
-            
-            # 应用校准系数 - 数据库操作使用db_executor
-            alpha_str = await loop.run_in_executor(
-                self.db_executor,
-                self.db.get_config_value,
-                'alpha_factor',
-                '1.0'
-            )
-            alpha = float(alpha_str)
-            
-            gex_calibrated = await loop.run_in_executor(
-                self.db_executor,
-                lambda: self.gex_calculator.apply_calibration(gex_result['total_gex'], alpha)
-            )
-            
-            # 识别Flip Zone和Put Wall
-            flip_zone = await loop.run_in_executor(
-                self.executor,
-                self.gex_calculator.identify_flip_zone,
-                gex_result['gex_by_strike']
-            )
-            put_wall = await loop.run_in_executor(
-                self.executor,
-                self.gex_calculator.find_put_wall,
-                gex_result['gex_by_strike']
-            )
-            
-            # 存入数据库
+
+            # GEX 数值 (SqueezeMetrics 官方值，无需校准)
+            gex_total = metrics['gex']
+            # DIX 百分比值
+            dix_pct = metrics['dix']
+            # SPX 价格
+            spx_price = metrics['price']
+
+            # 存入数据库 (put_wall / flip_zone 留空，CSV 不提供逐行权价分布)
             timestamp = datetime.now(pytz.timezone('US/Eastern'))
             await loop.run_in_executor(
                 self.db_executor,
                 self.db.insert_gex_record,
                 timestamp,
-                gex_result['total_gex'],
-                gex_calibrated,
-                alpha,
-                put_wall,
-                flip_zone.get('flip_zone_lower'),
-                flip_zone.get('flip_zone_upper')
+                gex_total,        # gex_local
+                gex_total,        # gex_calibrated (SqueezeMetrics 即官方值)
+                1.0,              # alpha (不需要校准)
+                0,                # put_wall (CSV 无逐行权价)
+                0,                # flip_zone_lower
+                0,                # flip_zone_upper
             )
-            
-            # 成功后重置失败计数
+
             self.fallback_manager.reset_failure_count('task_calculate_gex')
-            
-            logger.debug(
-                f"GEX计算完成: Local=${gex_result['total_gex']/1e6:.1f}M, "
-                f"Calibrated=${gex_calibrated/1e6:.1f}M, Put Wall=${put_wall}"
+
+            logger.info(
+                f"SQZ GEX+DIX: SPX={spx_price:.0f} | "
+                f"GEX=\${gex_total/1e9:.2f}B | DIX={dix_pct:.1f}%"
             )
-            
+
         except Exception as e:
-            logger.error(f"GEX计算任务失败: {e}", exc_info=True)
+            logger.error(f"SQZ GEX+DIX 失败: {e}", exc_info=True)
             self.fallback_manager.record_failure('task_calculate_gex')
     
     async def task_analyze_vix(self):
