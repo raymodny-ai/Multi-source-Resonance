@@ -9,8 +9,8 @@ playwright>=1.40.0
 # Retry Logic
 tenacity>=8.2.0
 
-# Cryptocurrency Exchange API (if needed)
-ccxt>=4.0.0
+# Cryptocurrency Exchange API (已弃用, 替换为 Coinglass API)
+# ccxt>=4.0.0  # 可选: 如需直接连单一交易所时取消注释
 
 # Data Validation & Settings
 pydantic>=2.0.0

@@ -31,9 +31,10 @@ from database.db_manager import DatabaseManager
 from data_fetchers import (
     TradierFetcher,  # 保留导入但不再用于 GEX (已替换为 SqueezeMetrics CSV)
     YahooFinanceFetcher,
-    CCXTFetcher,
+    CoinglassFetcher,  # 替代 CCXT: 全网聚合加密衍生品数据
     SqueezeMetricsFetcher,
-    ChartExchangeFetcher,
+    FMPFetcher,  # FMP 结构化短卖JSON (首选)
+    FINRAFetcher,  # FINRA 管道文件 (降级备选)
     DBMFFetcher
 )
 from data_fetchers.axlfi_fetcher import AxlfiFetcher
@@ -80,9 +81,10 @@ class MainScheduler:
         # 初始化数据获取器
         self.tradier_fetcher = None  # GEX 已替换为 SqueezeMetrics CSV, 不再使用 Tradier
         self.yahoo_fetcher = YahooFinanceFetcher()
-        self.ccxt_fetcher = CCXTFetcher()
+        self.coinglass_fetcher = CoinglassFetcher()  # 替代 CCXT: 全网聚合数据
         self.squeezemetrics_fetcher = SqueezeMetricsFetcher()
-        self.chartexchange_fetcher = ChartExchangeFetcher()  # API密钥从config自动读取
+        self.fmp_fetcher = FMPFetcher()  # FMP 结构化JSON (首选)
+        self.finra_fetcher = FINRAFetcher()  # FINRA 管道文件 (降级备选)
         self.axlfi_fetcher = AxlfiFetcher()  # AXLFI 公开API替代已下线Stockgrid
         self.dbmf_fetcher = DBMFFetcher()
         
@@ -380,12 +382,12 @@ class MainScheduler:
             
             funding_rate = await loop.run_in_executor(
                 self.executor,
-                self.ccxt_fetcher.get_funding_rate,
+                self.coinglass_fetcher.get_funding_rate,
                 'BTC/USDT'
             )
             current_oi = await loop.run_in_executor(
                 self.executor,
-                self.ccxt_fetcher.get_open_interest,
+                self.coinglass_fetcher.get_open_interest,
                 'BTC/USDT'
             )
             
@@ -733,29 +735,52 @@ class MainScheduler:
             self.fallback_manager.record_failure('task_fetch_dix')
     
     async def task_fetch_chartexchange(self):
-        """任务: 抓取ChartExchange卖空比
+        """任务: 获取短卖数据 (FMP JSON优先 → FINRA管道文件降级)
         
-        盘后抓取场外卖空成交量占比，作为暗盘空头压力指标。
+        盘后获取场外短卖成交量占比，优先使用 FMP 结构化JSON API，
+        失败或API Key未配置时自动降级到 FINRA 官方管道分隔文件。
         """
         try:
-            logger.info("开始执行ChartExchange抓取任务")
+            logger.info("开始执行短卖数据获取任务 (FMP → FINRA 降级链路)")
             loop = asyncio.get_event_loop()
             
+            short_ratio = None
+            data_source = None
+            
+            # 第1步: 尝试 FMP 结构化 JSON (首选)
             spy_data = await loop.run_in_executor(
                 self.executor,
-                lambda: self.chartexchange_fetcher.fetch_short_volume_data('SPY')
+                lambda: self.fmp_fetcher.fetch_short_volume_data('SPY')
             )
             
-            if not spy_data:
-                logger.warning("ChartExchange数据获取失败")
+            if spy_data:
+                logger.info("FMP 数据获取成功，计算短卖比例")
+                short_ratio = await loop.run_in_executor(
+                    self.executor,
+                    self.fmp_fetcher.calculate_off_exchange_short_ratio,
+                    spy_data
+                )
+                data_source = 'FMP'
+            else:
+                # 第2步: 降级到 FINRA 管道分隔文件
+                logger.warning("FMP 数据获取失败，降级到 FINRA 管道文件")
+                spy_data = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.finra_fetcher.fetch_short_volume_data('SPY')
+                )
+                
+                if spy_data:
+                    short_ratio = await loop.run_in_executor(
+                        self.executor,
+                        self.finra_fetcher.calculate_off_exchange_short_ratio,
+                        spy_data
+                    )
+                    data_source = 'FINRA'
+            
+            if not spy_data or short_ratio is None:
+                logger.warning("FMP和FINRA均获取短卖数据失败")
                 self.fallback_manager.record_failure('task_fetch_chartexchange')
                 return
-            
-            short_ratio = await loop.run_in_executor(
-                self.executor,
-                self.chartexchange_fetcher.calculate_off_exchange_short_ratio,
-                spy_data
-            )
             
             today = datetime.now(pytz.timezone('US/Eastern')).date()
             
@@ -770,10 +795,12 @@ class MainScheduler:
             # 成功后重置失败计数
             self.fallback_manager.reset_failure_count('task_fetch_chartexchange')
             
-            logger.info(f"ChartExchange抓取完成: Short Ratio={short_ratio:.1f}%")
+            logger.info(
+                f"短卖数据获取完成 (源={data_source}): Short Ratio={short_ratio:.1f}%"
+            )
             
         except Exception as e:
-            logger.error(f"ChartExchange抓取任务失败: {e}", exc_info=True)
+            logger.error(f"短卖数据获取任务失败: {e}", exc_info=True)
             self.fallback_manager.record_failure('task_fetch_chartexchange')
     
     async def task_fetch_stockgrid(self):

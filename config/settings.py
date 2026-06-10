@@ -38,6 +38,19 @@ class Config:
     TRADIER_BASE_URL: str = 'https://api.tradier.com/v1'
     TRADIER_SANDBOX_URL: str = 'https://sandbox.tradier.com/v1'
     
+    # Coinglass API配置 (用于获取全网加密衍生品数据, 替代CCXT)
+    # 免费注册: https://coinglass.com/register
+    # Hobbyist套餐 $29/月, 免费套餐有限端点
+    COINGLASS_API_KEY: str = os.getenv('COINGLASS_API_KEY', '')
+    COINGLASS_BASE_URL: str = 'https://open-api-v4.coinglass.com'
+    
+    # FMP (Financial Modeling Prep) API配置 (结构化短卖+场外交易量JSON API)
+    # 免费注册: https://site.financialmodelingprep.com/register
+    # Free Tier: 250 requests/day, Starter $19/月
+    # 优势: JSON直出shortVolume/totalVolume, 省去FINRA管道文件解析
+    FMP_API_KEY: str = os.getenv('FMP_API_KEY', '')
+    FMP_BASE_URL: str = 'https://financialmodelingprep.com'
+    
     # SqueezeMetrics API配置 (用于获取DIX/GEX指标)
     SQUEEZEMETRICS_API_KEY: str = os.getenv('SQUEEZEMETRICS_API_KEY', '')
     SQUEEZEMETRICS_BASE_URL: str = 'https://api.squeezemetrics.com'
@@ -209,6 +222,14 @@ class Config:
         if not cls.SQUEEZEMETRICS_API_KEY:
             warnings.append("SQUEEZEMETRICS_API_KEY未配置,暗盘指标将通过公开CSV免费获取(已内置支持)")
         
+        if not cls.COINGLASS_API_KEY:
+            warnings.append("COINGLASS_API_KEY未配置,加密数据将使用Mock模式(Coinglass Hobbyist $29/月)")
+        
+        if not cls.FMP_API_KEY:
+            warnings.append("FMP_API_KEY未配置,短卖数据将降级到FINRA管道文件(FMP Free Tier 250 req/day)")
+        else:
+            warnings.append(f"FMP API Key已配置(...{cls.FMP_API_KEY[-6:]}), 优先使用结构化JSON获取短卖数据")
+        
         # 检查通知配置 (至少需要一种通知方式)
         if not cls.EMAIL_RECIPIENTS and not cls.TELEGRAM_BOT_TOKEN:
             warnings.append("邮件和Telegram配置均未设置,告警推送将失败")
@@ -283,10 +304,18 @@ class DataFetchConfig:
     网站改版或API变更时只需修改此处，无需改动业务代码。
     """
     
-    # ChartExchange 经过验证的端点配置
+    # ChartExchange 经过验证的端点配置 (已弃用, 保留兼容)
     CHARTEXCHANGE_API = "https://chartexchange.com/api/short-volume/data/{symbol}/"
     
-    # Stockgrid XHR 匹配与 DOM 选择器
+    # FMP 结构化 JSON API (短卖数据首选，省去管道文件解析)
+    # 端点: /api/v4/short_volume?symbol={SYMBOL}&apikey={KEY}
+    FMP_SHORT_VOLUME_URL = "https://financialmodelingprep.com/api/v4/short_volume"
+    
+    # FINRA 官方每日短卖量文件 (降级备选)
+    # 每日美东16:00后更新, 管道分隔格式: Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market
+    FINRA_SHORT_VOLUME_URL = "https://cdn.finra.org/equity/regsho/daily/CNMSshvol{date}.txt"
+    
+    # Stockgrid XHR 匹配与 DOM 选择器 (已弃用, 保留兼容)
     STOCKGRID_URL = "https://stockgrid.io/darkpool/{symbol}"
     STOCKGRID_XHR_PATTERN = "api/darkpool"
     STOCKGRID_DOM_CHART = ".darkpool-chart"
