@@ -9,8 +9,10 @@
 - 解析CALL/PUT期权的关键字段（行权价、价格、成交量等）
 - 集成tenacity指数退避重试机制
 - 提供Mock模式用于测试环境
+- 支持免费Sandbox模式 (延迟15分钟,无需付费账户)
 
 API文档: https://documentation.tradier.com/brokerage-api/markets/get-options-chains
+沙箱注册: https://developer.tradier.com/user/sign_up
 """
 
 import pandas as pd
@@ -31,26 +33,43 @@ class TradierFetcher:
     通过Tradier Brokerage API获取美股期权链数据，支持盘中高频调用。
     主要用于计算本地Gamma敞口(GEX)和识别Put Wall关键支撑位。
     
+    支持三种运行模式:
+    - 生产模式: 真实账户API密钥,实时数据 (TRADIER_API_KEY)
+    - 沙箱模式: 免费注册,延迟15分钟数据 (TRADIER_SANDBOX_MODE=true)
+    - Mock模式: 纯本地模拟数据,用于测试 (mock_mode=True)
+    
     Attributes:
-        api_key: Tradier API密钥
+        api_key: Tradier API密钥或沙箱令牌
         account_id: Tradier账户ID
-        base_url: API基础URL
+        base_url: API基础URL (根据模式自动切换生产/沙箱端点)
         headers: HTTP请求头，包含认证信息
         mock_mode: Mock模式开关，True时返回模拟数据
+        sandbox_mode: 沙箱模式开关，True时使用免费沙箱端点
     """
     
-    def __init__(self, api_key: Optional[str] = None, account_id: Optional[str] = None, mock_mode: bool = False):
+    def __init__(self, api_key: Optional[str] = None, account_id: Optional[str] = None, 
+                 mock_mode: bool = False, use_sandbox: Optional[bool] = None):
         """初始化Tradier数据获取器
         
         Args:
             api_key: Tradier API密钥，默认从Config读取
             account_id: Tradier账户ID，默认从Config读取
             mock_mode: Mock模式开关，用于无API密钥时的测试
+            use_sandbox: 沙箱模式开关,None时自动从Config.TRADIER_SANDBOX_MODE读取
         """
-        self.api_key = api_key or Config.TRADIER_API_KEY
-        self.account_id = account_id or Config.TRADIER_ACCOUNT_ID
-        self.base_url = Config.TRADIER_BASE_URL
         self.mock_mode = mock_mode
+        self.sandbox_mode = use_sandbox if use_sandbox is not None else Config.TRADIER_SANDBOX_MODE
+        
+        if self.sandbox_mode:
+            # 沙箱模式: 使用免费sandbox端点 + 沙箱令牌
+            self.api_key = api_key or Config.TRADIER_SANDBOX_TOKEN
+            self.account_id = account_id or Config.TRADIER_ACCOUNT_ID or 'sandbox'
+            self.base_url = Config.TRADIER_SANDBOX_URL
+        else:
+            # 生产模式: 使用真实API端点
+            self.api_key = api_key or Config.TRADIER_API_KEY
+            self.account_id = account_id or Config.TRADIER_ACCOUNT_ID
+            self.base_url = Config.TRADIER_BASE_URL
         
         # 构建HTTP请求头
         self.headers = {
@@ -58,7 +77,8 @@ class TradierFetcher:
             'Accept': 'application/json'
         }
         
-        logger.info(f"TradierFetcher初始化完成 (mock_mode={mock_mode})")
+        mode_desc = 'sandbox' if self.sandbox_mode else ('mock' if self.mock_mode else 'production')
+        logger.info(f"TradierFetcher初始化完成 (mode={mode_desc}, base_url={self.base_url})")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -286,13 +306,14 @@ class TradierFetcher:
 
 
 # 便捷函数
-def create_tradier_fetcher(mock_mode: bool = False) -> TradierFetcher:
+def create_tradier_fetcher(mock_mode: bool = False, use_sandbox: Optional[bool] = None) -> TradierFetcher:
     """创建Tradier数据获取器实例的工厂函数
     
     Args:
         mock_mode: 是否启用Mock模式
+        use_sandbox: 是否启用沙箱模式,None时自动从Config读取
         
     Returns:
         TradierFetcher: 配置好的获取器实例
     """
-    return TradierFetcher(mock_mode=mock_mode)
+    return TradierFetcher(mock_mode=mock_mode, use_sandbox=use_sandbox)

@@ -29,9 +29,14 @@ class Config:
     # ==================== API配置 ====================
     
     # Tradier API配置 (用于获取期权链和暗盘数据)
+    # 生产环境: 需要真实Tradier账户API密钥,实时数据
+    # 沙箱环境: 免费注册获得沙箱令牌,延迟15分钟数据
     TRADIER_API_KEY: str = os.getenv('TRADIER_API_KEY', '')
     TRADIER_ACCOUNT_ID: str = os.getenv('TRADIER_ACCOUNT_ID', '')
+    TRADIER_SANDBOX_MODE: bool = os.getenv('TRADIER_SANDBOX_MODE', '').lower() in ('true', '1', 'yes')
+    TRADIER_SANDBOX_TOKEN: str = os.getenv('TRADIER_SANDBOX_TOKEN', '')
     TRADIER_BASE_URL: str = 'https://api.tradier.com/v1'
+    TRADIER_SANDBOX_URL: str = 'https://sandbox.tradier.com/v1'
     
     # SqueezeMetrics API配置 (用于获取DIX/GEX指标)
     SQUEEZEMETRICS_API_KEY: str = os.getenv('SQUEEZEMETRICS_API_KEY', '')
@@ -191,12 +196,18 @@ class Config:
         missing = []
         warnings = []
         
-        # 检查必要的API密钥
+        # 检查必要的API密钥 (沙箱模式下使用TRADIER_SANDBOX_TOKEN)
         if not cls.TRADIER_API_KEY:
-            warnings.append("TRADIER_API_KEY未配置,GEX计算将使用Mock数据")
+            if cls.TRADIER_SANDBOX_MODE:
+                if not cls.TRADIER_SANDBOX_TOKEN:
+                    warnings.append("Tradier沙箱模式已启用,但TRADIER_SANDBOX_TOKEN未配置")
+                else:
+                    warnings.append("Tradier沙箱模式已启用,使用延迟15分钟的免费数据")
+            else:
+                warnings.append("TRADIER_API_KEY未配置,GEX计算将使用Mock数据")
         
         if not cls.SQUEEZEMETRICS_API_KEY:
-            warnings.append("SQUEEZEMETRICS_API_KEY未配置,暗盘指标将使用Mock数据")
+            warnings.append("SQUEEZEMETRICS_API_KEY未配置,暗盘指标将通过公开CSV免费获取(已内置支持)")
         
         # 检查通知配置 (至少需要一种通知方式)
         if not cls.EMAIL_RECIPIENTS and not cls.TELEGRAM_BOT_TOKEN:
