@@ -78,7 +78,12 @@ class HyperliquidStream:
     @property
     def is_connected(self) -> bool:
         """WebSocket 是否已连接"""
-        return self._ws is not None and not self._ws.closed
+        if self._ws is None:
+            return False
+        try:
+            return not self._ws.closed
+        except AttributeError:
+            return self._ws.state == 3  # OPEN
 
     @property
     def is_running(self) -> bool:

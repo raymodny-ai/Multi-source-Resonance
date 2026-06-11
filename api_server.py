@@ -8,6 +8,7 @@ v2.0: 完整 PRD API 规范实现
 v2.1: 手动采集 + 自动轮询控制
 """
 import sys
+import os
 import asyncio
 import json
 import logging
@@ -600,24 +601,54 @@ async def incident_detail(incident_id: int):
 
 
 # ==================== SSE 日志流 ====================
+import aiofiles
+
+# 日志文件路径 (Stream Engine 写入)
+_LOG_PATH = Path(__file__).parent / "logs" / "stream_engine.log"
+
+# 全局状态：当前客户端数 & 文件偏移
+_log_clients = 0
+_log_tail_lock = asyncio.Lock()
+
+
+def _map_log_level(line: str) -> str:
+    """从日志行提取级别映射到前端 level"""
+    if "[ERROR]" in line:
+        return "ERROR"
+    if "[WARNING]" in line:
+        return "WARN"
+    return "INFO"
+
+
 async def log_event_generator():
-    """SSE 事件生成器 - 模拟实时任务日志"""
-    tasks = [
-        ("task_evaluate_resonance", 4.8, "LEVEL_3 共振触发"),
-        ("task_calculate_gex", 150, "GEX 翻正 +$150M"),
-        ("task_analyze_vix", 0.98, "VIX 期限结构 Contango"),
-        ("task_fetch_hyperliquid", 0, "BTC 资金费率 +0.01% OI $12.5B"),
-        ("task_fetch_darkpool", 47.2, "DIX 47.2% 触发吸筹信号"),
-        ("task_fetch_ccdata", 0, "降级备选已启用"),
-    ]
-    idx = 0
-    while True:
-        task_name, value, msg = tasks[idx % len(tasks)]
-        status = "❌" if "降级" in msg else "✅"
-        log_line = f"{datetime.now().strftime('%H:%M:%S')} {status} {task_name}: {msg}\n"
-        yield f"data: {json.dumps({'line': log_line, 'level': 'ERROR' if '❌' in status else 'INFO'})}\n\n"
-        idx += 1
-        await asyncio.sleep(3)
+    """SSE 事件生成器 — 实时 tail logs/stream_engine.log"""
+    global _log_clients
+    _log_clients += 1
+    try:
+        async with _log_tail_lock:
+            # 如果文件存在, 从当前末尾开始 tail
+            if _LOG_PATH.exists():
+                async with aiofiles.open(_LOG_PATH, "r", encoding="utf-8") as f:
+                    await f.seek(0, os.SEEK_END)
+        # 持续 tail
+        while True:
+            if _LOG_PATH.exists():
+                async with aiofiles.open(_LOG_PATH, "r", encoding="utf-8") as f:
+                    await f.seek(0, os.SEEK_END)
+                    # poll with 1s interval
+                    while True:
+                        line = await f.readline()
+                        if line:
+                            level = _map_log_level(line)
+                            # 去掉时间戳前缀，保留可读部分
+                            yield f"data: {json.dumps({'line': line.rstrip(), 'level': level})}\n\n"
+                        else:
+                            await asyncio.sleep(1)
+            else:
+                yield f"data: {json.dumps({'line': '[INFO] 等待日志文件...', 'level': 'INFO'})}\n\n"
+                await asyncio.sleep(5)
+    finally:
+        _log_clients -= 1
 
 
 @app.get("/api/system/logs/stream")
