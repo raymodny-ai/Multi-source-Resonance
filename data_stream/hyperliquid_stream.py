@@ -160,7 +160,11 @@ class HyperliquidStream:
             await self._ws.send(json.dumps(sub_msg))
             logger.info(f"Hyperliquid WS 已连接并订阅 {self._coin} activeAssetData")
 
-            # 启动 ping 和 listen 任务
+            # 取消旧任务后再创建新任务（防止重复）
+            if self._ping_task and not self._ping_task.done():
+                self._ping_task.cancel()
+            if self._listen_task and not self._listen_task.done():
+                self._listen_task.cancel()
             self._ping_task = asyncio.create_task(self._ping_loop())
             self._listen_task = asyncio.create_task(self._listen_loop())
 
