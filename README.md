@@ -2,10 +2,11 @@
 
 ## 项目概述
 
-基于 **WebSocket + EventBus 实时事件驱动（Push）架构** 的多源数据共振金融监控系统。实时追踪美股暗盘机构资金动向、做市商 Gamma 敞口、VIX 波动率期限结构和加密市场杠杆清洗，通过四维度共振评分自动识别"流动性清算衰竭"级别的抄底信号，多渠道推送告警。
+基于 **WebSocket + EventBus 实时事件驱动（Push）架构** 的多源数据共振金融监控系统。配备 **React 前端仪表盘** 和 **FastAPI REST 后端**，实时追踪美股暗盘机构资金动向、做市商 Gamma 敞口、VIX 波动率期限结构和加密市场杠杆清洗。通过四维度共振评分自动识别"流动性清算衰竭"级别的抄底信号，多渠道推送告警。
 
 ### 核心能力
 
+- **前端 Web UI**：React + TypeScript 仪表盘，系统状态监控、手动数据采集、自动轮询控制
 - **实时数据流**：Hyperliquid DEX WebSocket 长连接推送 BTC 资金费率/持仓量
 - **四维共振评分**：GEX + VIX + 加密杠杆 + 暗盘吸筹，满分 5.0，LEVEL_3 阈值 3.5
 - **多渠道告警**：邮件（SMTP）、Telegram Bot、Discord Webhook 并发推送
@@ -21,7 +22,7 @@ graph TB
     subgraph 数据源层["数据源层"]
         HL[Hyperliquid DEX<br/>WebSocket<br/>BTC funding/OI]
         SQZ[SqueezeMetrics<br/>CSV 公开数据<br/>DIX/GEX]
-        YF[Yahoo Finance<br/>VIX 期货<br/>+ yfinance 做空数据]
+        VX[vix_utils<br/>CBOE 官方<br/>VIX 期货+现货]
         AXL[AXLFI 公开 API<br/>暗盘净头寸]
         DBMF[DBMF ETF<br/>均线收复]
     end
@@ -57,7 +58,8 @@ graph TB
 
     HL -->|funding_rate<br/>open_interest| EB
     SQZ -->|GEX/DIX| RSS -->|gex.update| EB
-    YF -->|VIX/做空| RSS -->|vix.term_structure<br/>short_volume.spy| EB
+    VX -->|VIX 期限结构| RSS -->|vix.term_structure| EB
+    YF[yfinance<br/>做空数据] -->|short_volume| RSS -->|short_volume.spy| EB
     AXL -->|暗盘净头寸| RSS -->|darkpool.axlfi| EB
     DBMF -->|ma5_recovery| RSS -->|dbmf.recovery| EB
 
@@ -89,7 +91,7 @@ Multi-source Resonance/
 │   ├── settings.py               # Config / StreamConfig / DataFetchConfig
 │   └── .env.example              # 环境变量模板
 ├── data_fetchers/                # 数据获取器 (14个)
-│   ├── yahoo_finance_fetcher.py  # VIX期货 + yfinance做空数据 (shortPercentOfFloat等)
+│   ├── yahoo_finance_fetcher.py  # vix_utils VIX期货+现货(CBOE官方) + yfinance做空数据
 │   ├── hyperliquid_fetcher.py    # Hyperliquid DEX REST (降级备选)
 │   ├── ccdata_fetcher.py         # CCData CEX REST (降级备选)
 │   ├── squeezemetrics_fetcher.py # SqueezeMetrics DIX/GEX CSV
@@ -100,6 +102,10 @@ Multi-source Resonance/
 │   ├── chartexchange_fetcher.py  # ChartExchange 场外数据 (保留)
 │   ├── stockgrid_fetcher.py      # Stockgrid Playwright 爬虫 (已弃用)
 │   └── ccxt_fetcher.py           # CCXT 交易所 (已弃用)
+├── api_server.py                 # ★ FastAPI REST API 服务
+├── frontend/                     # React + TypeScript 前端
+│   ├── src/pages/                # Dashboard / SystemStatus / SignalsPanel
+│   └── src/api/                  # React Query hooks
 ├── data_stream/                  # Push 实时流架构
 │   ├── event_bus.py              # 异步事件总线 (Pub/Sub)
 │   ├── hyperliquid_stream.py     # Hyperliquid DEX WebSocket 连接器
@@ -137,7 +143,7 @@ Multi-source Resonance/
 | 维度 | 子指标 | 主要数据源 | 降级数据源 | 获取方式 | 频率 |
 |------|--------|-----------|-----------|---------|------|
 | **GEX/DIX** | GEX 总敞口、DIX 暗盘强度 | SqueezeMetrics CSV | — | REST 轮询 | 盘中 15min |
-| **VIX** | 期限结构 (VX1/VX2), 恐慌溢价 | Yahoo Finance | — | REST 轮询 | 盘中 15min |
+| **VIX** | 期限结构 (VX1/VX2), 恐慌溢价 | vix_utils (CBOE官方) | — | REST 轮询 | 盘中 15min |
 | **Crypto** | BTC 资金费率、持仓量 | **Hyperliquid DEX WebSocket** | CCData REST API | **WebSocket 实时推送** | 实时 |
 | **Darkpool** | 暗盘净头寸、底背离 | AXLFI API | — | REST 轮询 | 盘中 15min |
 | **做空数据** | shortPercentOfFloat、shortRatio、sharesShort | **yfinance 库** (免费) | FINRA 管道文件 | 盘后一次性 | 1次/日 |
@@ -197,7 +203,8 @@ RESTPoll → dbmf.recovery ─────────────┘
 
 替代 APScheduler 的 `asyncio.create_task` + `asyncio.sleep` 模式：
 - `_poll_gex_dix()` — SqueezeMetrics GEX/DIX，盘中 15min
-- `_poll_vix()` — Yahoo VIX 期限结构，盘中 15min
+- `_poll_vix()` — vix_utils/CBOE VIX 期限结构，盘中 15min
+- `_poll_short_volume()` — yfinance 做空数据，盘后一次性
 - `_poll_axlfi()` — AXLFI 暗盘净头寸，盘中 15min
 - `_poll_dbmf()` — DBMF 均线收复，盘中 15min
 - `run_afterhours_short_volume()` — yfinance 做空数据，盘后一次性
@@ -322,7 +329,7 @@ CCDATA_API_KEY=your_ccdata_api_key_here
 - Hyperliquid DEX（去中心化衍生品，完全免费）
 - yfinance 做空数据（Yahoo Finance，免费，无需 API Key）
 - SqueezeMetrics CSV（公开数据）
-- Yahoo Finance VIX（免费）
+- vix_utils / CBOE 官方 VIX 数据（免费）
 - AXLFI 暗盘（公开 API）
 - FINRA 管道文件（官方公开数据）
 - DBMF ETF（通过 yfinance）
@@ -360,7 +367,8 @@ python verify_setup.py
 | **实时通信** | `websockets` (Hyperliquid DEX WebSocket) |
 | **异步框架** | `asyncio` (EventBus / StreamEngine) |
 | **数据处理** | `pandas`, `numpy`, `scipy` |
-| **金融数据** | `yfinance` (Yahoo Finance 做空数据 + VIX) |
+| **金融数据** | `vix_utils` (CBOE VIX期货+现货), `yfinance` (做空数据) |
+| **Web 框架** | `FastAPI`, `uvicorn` (REST API), `React` + `TypeScript` (前端) |
 | **HTTP 客户端** | `requests`, `playwright` |
 | **重试机制** | `tenacity` |
 | **数据验证** | `pydantic` |
@@ -401,6 +409,6 @@ python verify_setup.py
 本项目仅供学习和研究使用。
 
 ---
-**当前版本**: v2 (Push 实时流架构)  
-**最后更新**: 2026-06-10  
-**入口文件**: `main_stream.py`
+**当前版本**: v2.1 (Push 实时流 + FastAPI + React 前端)  
+**最后更新**: 2026-06-09  
+**入口文件**: `main_stream.py` / `api_server.py` / `frontend/`

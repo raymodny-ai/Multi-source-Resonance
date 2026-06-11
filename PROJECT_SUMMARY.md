@@ -4,9 +4,9 @@
 
 本项目基于PRD文档实现了一个完整的美股多源共振监控系统，通过整合做市商Gamma敞口、VIX期限结构、加密市场杠杆清洗和机构暗盘吸筹四大维度，构建全自动化的LEVEL 3抄底信号触发机制。
 
-**技术栈**: Python 3.10+, SQLite, Playwright, Pandas, NumPy, APScheduler  
+**技术栈**: Python 3.10+, SQLite, Pandas, NumPy, FastAPI, React + TypeScript, vix_utils  
 **开发周期**: 按9个Phase分阶段实施  
-**当前状态**: ✅ Phase 1-7核心功能全部完成
+**当前状态**: ✅ Phase 1-7核心功能全部完成 + 前端 Web UI + vix_utils 迁移
 
 ---
 
@@ -30,7 +30,7 @@
 **负责人**: Lee  
 **交付物**:
 - ✅ data_fetchers/tradier_fetcher.py - Tradier期权链获取器
-- ✅ data_fetchers/yahoo_finance_fetcher.py - Yahoo VIX期货获取器
+- ✅ data_fetchers/yahoo_finance_fetcher.py - vix_utils VIX期货+现货(CBOE官方) + yfinance做空数据 🔄 已迁移
 - ✅ data_fetchers/ccxt_fetcher.py - CCXT加密交易所数据获取器
 - ✅ data_fetchers/squeezemetrics_fetcher.py - SqueezeMetrics DIX指标获取器
 - ✅ data_fetchers/chartexchange_fetcher.py - ChartExchange卖空比解析器(技术难点)
@@ -40,6 +40,7 @@
 **代码量**: ~2,425行  
 **技术亮点**: 
 - 7个数据源全覆盖
+- VIX数据源已从 Yahoo Finance 迁移至 vix_utils (CBOE官方, 2004年至今)
 - Tenacity指数退避重试机制
 - Mock模式支持
 - 单例模式管理Playwright浏览器
@@ -123,14 +124,19 @@
 **负责人**: Chris  
 **交付物**:
 - ✅ notification/alert_sender.py - AlertSender多渠道告警推送管理器
+- ✅ 🆕 frontend/ - React + TypeScript 前端 Web UI (PRD 2.0)
+- ✅ 🆕 api_server.py - FastAPI REST API 服务
 
-**代码量**: ~400行  
+**代码量**: ~400行(notification) + ~2,500行(frontend) + ~500行(api_server)  
 **技术亮点**:
 - SMTP邮件发送(HTML格式)
 - Telegram Bot消息推送(Markdown支持)
 - Discord Webhook富文本推送
 - 多渠道并发发送
 - LEVEL 3告警标准化格式化(PRD 4.2节模板)
+- 🆕 Dashboard 实时仪表盘 (暗盘详情 / GEX / VIX / 信号共振)
+- 🆕 SystemStatus 手动采集按钮 + 自动轮询 Toggle + 降级状态
+- 🆕 SignalsPanel 最近信号 + 信号历史表格
 
 **通知渠道**:
 - Email(默认Gmail SMTP)
@@ -421,16 +427,22 @@ python main_scheduler.py
 - [x] C3: Playwright浏览器未初始化 → 已添加自动安装检查
 - [x] C4: GEX/VIX除零风险 → 已添加输入验证和NaN检查
 - [x] C5: 信号状态机未持久化 → 已实现JSON文件持久化
+- [x] C6: VIX数据源不可靠(Yahoo Finance) → 已迁移至 vix_utils (CBOE官方)
+- [x] C7: 缺少前端可视化 → 已完成 React+TypeScript Web UI (PRD 2.0)
 
 ### ✅ 已修复(Warning)
 - [x] W1-W3: API请求异常处理缺失 → 已添加具体异常捕获
 - [x] W4: 高频任务日志级别过高 → 已降级为DEBUG
 - [x] W5-W6: 类型提示不完整 → 已补充完整Type Hints
 - [x] W7-W8: 配置默认值缺失 → 已添加安全默认值和验证
+- [x] W9: 前端 hooks 排序错误(#310) → SignalsPanel 已修复
+- [x] W10: DarkpoolDetail 空白页 → echarts-for-react CJS/ESM 互操作修复
 
 ### ✅ 已优化(Info)
 - [x] I1-I2: 关键模块docstring补充 → main_scheduler.py, db_manager.py等已完善
 - [x] I3-I5: 魔法数字提取到config → 已完成Thresholds类并全局引用
+- [x] I6: 手动采集功能 → SystemStatus 页一键采集 6 维度数据
+- [x] I7: 自动轮询控制 → Toggle 开关 + localStorage 持久化 + 黄色警告横幅
 
 ---
 
@@ -452,6 +464,6 @@ python main_scheduler.py
 
 ---
 
-**最后更新**: 2026-06-09 (Info Issues优化完成)  
-**版本**: v1.1.0  
-**状态**: ✅ Phase 1-7核心功能全部完成,Info Issues已优化,可投入生产使用
+**最后更新**: 2026-06-09 (vix_utils迁移 + 前端手动采集功能)  
+**版本**: v2.1.0  
+**状态**: ✅ Phase 1-7核心功能 + 前端Web UI + vix_utils CBOE数据源 + 手动采集/轮询控制
