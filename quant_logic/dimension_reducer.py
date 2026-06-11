@@ -72,6 +72,10 @@ class ResonanceVector:
     available_dimensions: int = 4                # 可用维度数量
     missing_dimensions: List[str] = field(default_factory=list)  # 缺失维度列表
 
+    # 暗盘逐源质量 (规范 §5)
+    darkpool_source_status: Dict[str, str] = field(default_factory=dict)
+    darkpool_degradation_mode: str = "NORMAL"    # NORMAL / DEGRADED / FALLBACK_ONLY_GEX
+
     # 跨资产共振 (P2-1)
     cross_asset_coherence_score: float = 50.0    # 跨资产一致性得分 (0-100)
     cross_asset_alignment_direction: str = "NEUTRAL"  # 对齐方向 BULLISH/BEARISH/NEUTRAL

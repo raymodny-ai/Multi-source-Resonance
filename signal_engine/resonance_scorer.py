@@ -338,7 +338,7 @@ class ResonanceScorer:
         stockgrid_flag: bool,
         dbmf_recovery: bool,
         available_sources: Optional[Dict[str, bool]] = None,
-        
+        degradation_mode: str = "NORMAL",
         preprocessed_bonus: float = 0.0,
     ) -> Dict[str, any]:
         """支持动态降级逻辑的暗盘评分系统 (v2.1 含 EMA 预处理加成)
@@ -349,9 +349,10 @@ class ResonanceScorer:
         available_sources: 标记哪些数据源本次爬取成功
                           例: {'dix': True, 'short_ratio': False, 'stockgrid': True}
                           None 表示全部可用（等同于标准版）
+        degradation_mode: 暗盘降级模式 NORMAL | DEGRADED | FALLBACK_ONLY_GEX (规范 §5)
         
         Returns:
-            dict: 包含 score, state, details
+            dict: 包含 score, state, details, degradation_mode
         """
         try:
             # 默认全部可用
@@ -367,11 +368,12 @@ class ResonanceScorer:
             
             # PRD 第6节：极端全解析失败退化
             if total_available == 0:
-                logger.critical("[CRITICAL] 场外暗盘所有爬虫接口触发改版异常，已退化为纯本地实时衍生品计算流模式！")
+                logger.critical("[CRITICAL] 暗盘数据全部失效 — 共振退化为 GEX+VIX+Crypto 模式！")
                 return {
                     'score': 0.0,
                     'state': 'DEGRADED_CRITICAL',
-                    'details': '全部暗盘源失效，得分降为0'
+                    'details': '全部暗盘源失效，得分降为0',
+                    'degradation_mode': 'FALLBACK_ONLY_GEX',
                 }
 
             # 仅统计当前存活源的有效触发数
@@ -412,7 +414,8 @@ class ResonanceScorer:
             return {
                 'score': round(score, 2),
                 'state': state,
-                'details': details
+                'details': details,
+                'degradation_mode': degradation_mode,
             }
 
         except Exception as e:
@@ -420,7 +423,8 @@ class ResonanceScorer:
             return {
                 'score': 0.0,
                 'state': 'ERROR',
-                'details': '计算异常'
+                'details': '计算异常',
+                'degradation_mode': 'FALLBACK_ONLY_GEX',
             }
     
     @staticmethod

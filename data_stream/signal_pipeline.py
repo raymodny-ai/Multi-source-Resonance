@@ -408,6 +408,62 @@ class SignalPipeline:
             logger.error(f"Darkpool维度评估失败: {e}", exc_info=True)
 
     # ================================================================
+    # 暗盘源质量收集 (规范 §5)
+    # ================================================================
+
+    def _collect_darkpool_source_status(self) -> tuple:
+        """从适配器收集暗盘各数据源的实时质量状态
+
+        Returns:
+            (source_status: Dict[str, str], degradation_mode: str)
+            source_status: {'axlfi': 'OK', 'squeezemetrics': 'OK', 'stockgrid': 'UNAVAILABLE'}
+            degradation_mode: NORMAL | DEGRADED | FALLBACK_ONLY_GEX
+        """
+        source_status: Dict[str, str] = {}
+
+        try:
+            from data_fetchers.axlfi_adapter import create_axlfi_adapter
+            axlfi = create_axlfi_adapter()
+            report = axlfi.fetch_with_quality("SPY", window=5)
+            source_status['axlfi'] = report.status.value
+        except Exception as e:
+            logger.warning(f"AXLFI 质量检查失败: {e}")
+            source_status['axlfi'] = 'UNAVAILABLE'
+
+        try:
+            from data_fetchers.squeezemetrics_adapter import create_squeezemetrics_adapter
+            sqz = create_squeezemetrics_adapter()
+            report = sqz.fetch_with_quality()
+            source_status['squeezemetrics'] = report.status.value
+        except Exception as e:
+            logger.warning(f"SqueezeMetrics 质量检查失败: {e}")
+            source_status['squeezemetrics'] = 'UNAVAILABLE'
+
+        # Stockgrid 始终 UNAVAILABLE
+        source_status['stockgrid'] = 'UNAVAILABLE'
+
+        # 计算降级模式
+        available_count = sum(
+            1 for s in source_status.values()
+            if s in ('OK', 'DEGRADED_NETWORK')
+        )
+        total_sources = len(source_status)
+
+        if available_count == total_sources:
+            degradation_mode = 'NORMAL'
+        elif available_count > 0:
+            degradation_mode = 'DEGRADED'
+        else:
+            degradation_mode = 'FALLBACK_ONLY_GEX'
+
+        logger.info(
+            f"暗盘源状态: {source_status}, "
+            f"降级模式={degradation_mode} ({available_count}/{total_sources} 可用)"
+        )
+
+        return source_status, degradation_mode
+
+    # ================================================================
     # Event Handler: 数据源错误 / 降级
     # ================================================================
 
@@ -559,11 +615,14 @@ class SignalPipeline:
                 ),
             )
 
-            # 暗盘评分 (支持降级)
+            # 暗盘评分 (支持降级) — 从适配器收集真实源状态
+            darkpool_source_status, darkpool_degradation_mode = \
+                self._collect_darkpool_source_status()
+
             available_sources = {
-                'dix': False,  # SqueezeMetrics CSV
-                'short_ratio': True,  # yfinance/FINRA
-                'stockgrid': True,  # AXLFI
+                'dix': darkpool_source_status.get('squeezemetrics', 'OK') in ('OK', 'DEGRADED_NETWORK'),
+                'short_ratio': True,  # yfinance/FINRA 始终可用
+                'stockgrid': darkpool_source_status.get('axlfi', 'OK') in ('OK', 'DEGRADED_NETWORK'),
             }
             darkpool_score = await loop.run_in_executor(
                 self._executor,

@@ -59,6 +59,8 @@ class GatewaySerializer:
             data_quality_flag=vector.data_quality_flag,
             available_dimensions=vector.available_dimensions,
             missing_dimensions=vector.missing_dimensions,
+            darkpool_source_status=vector.darkpool_source_status,
+            darkpool_degradation_mode=vector.darkpool_degradation_mode,
             # P2-1: 跨资产共振
             cross_asset_coherence_score=vector.cross_asset_coherence_score,
             cross_asset_alignment_direction=vector.cross_asset_alignment_direction,

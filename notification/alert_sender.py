@@ -241,6 +241,35 @@ class AlertSender:
             logger.error(f"Discord Webhook发送失败: {e}", exc_info=True)
             return False
     
+    def send_critical_alert(
+        self,
+        subject: str,
+        message: str,
+    ) -> Dict[str, bool]:
+        """发送 CRITICAL 级别高优告警 (规范 §6)
+
+        当暗盘数据全部失效或系统出现严重降级时，通过所有可用渠道
+        发送高优先级告警。与 send_multi_channel_alert 的区别：
+        - 强制使用所有渠道（email + telegram + discord）
+        - 主题前缀加 [CRITICAL] 标签
+        - 记录 CRITICAL 级别日志
+
+        Args:
+            subject: 告警主题
+            message: 告警内容
+
+        Returns:
+            Dict[str, bool]: 各渠道发送结果
+        """
+        critical_subject = f"[CRITICAL] {subject}"
+        logger.critical(f"发送 CRITICAL 告警: {critical_subject}")
+
+        return self.send_multi_channel_alert(
+            subject=critical_subject,
+            message=message,
+            channels=['email', 'telegram', 'discord'],
+        )
+
     def send_multi_channel_alert(
         self,
         subject: str,

@@ -47,6 +47,10 @@
 | **多渠道告警** | Email (SMTP) + Telegram Bot + Discord Webhook 并发推送 |
 | **Docker 部署** | 多阶段构建 + docker-compose + Nginx + Prometheus + Grafana |
 | **降级容错** | Hyperliquid → CCData 降级、yfinance → FINRA 降级 |
+| **数据质量规范** | SourceStatus 枚举 + ErrorCategory 分类 + tenacity 指数退避重试 |
+| **适配器模式** | Stockgrid / SqueezeMetrics / AXLFI 适配器层，统一质量报告输出 |
+| **暗盘降级联动** | 动态 available_sources → degradation_mode → 共振评分自动退避 |
+| **监控审计** | 每日成功率/Latency/结构变更统计 + 连续 N 日不可用 CRITICAL 告警 |
 
 ---
 
@@ -55,8 +59,9 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          数据源层                                    │
-│  Hyperliquid WS │ SqueezeMetrics │ CBOE VIX │ AXLFI │ yfinance │ FINRA │
-└────────┬────────┴───────┬────────┴────┬─────┴───┬────┴────┬──────┴──────┘
+│  Hyperliquid WS │ SqueezeMetrics │ CBOE VIX │ AXLFI │ yfinance │ FINRA │ Stockgrid │
+│                  │   [Adapter]    │          │[Adapter]│         │          │ [Adapter] │
+└────────┬────────┴───────┬────────┴────┬─────┴───┬────┴────┬──────┴──────┴─────┬─────┘
          │                │             │         │         │
          ▼                ▼             ▼         ▼         ▼
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -111,10 +116,15 @@ Multi-source Resonance/
 │   └── stream_engine.py            # 统一流引擎
 │
 ├── data_fetchers/                  # 数据获取器
+│   ├── source_status.py            # ★ 统一数据质量状态模型 (SourceStatus/ErrorCategory)
+│   ├── stockgrid_adapter.py        # ★ Stockgrid 适配器 (UNAVAILABLE + DOM 哈希监控)
+│   ├── squeezemetrics_adapter.py   # ★ SqueezeMetrics 适配器 (CSV 契约校验+快照归档)
+│   ├── axlfi_adapter.py            # ★ AXLFI 适配器 (tenacity 指数退避重试)
+│   ├── monitor.py                  # ★ 数据源健康监控 (日统计+连续不可用检测)
 │   ├── hyperliquid_fetcher.py      # Hyperliquid DEX REST (降级备选)
 │   ├── ccdata_fetcher.py           # CCData CEX REST (降级备选)
-│   ├── axlfi_fetcher.py            # AXLFI 暗盘净头寸 ★
-│   ├── squeezemetrics_fetcher.py   # SqueezeMetrics DIX/GEX CSV
+│   ├── axlfi_fetcher.py            # AXLFI 暗盘净头寸 (被 adapter 包装)
+│   ├── squeezemetrics_fetcher.py   # SqueezeMetrics DIX/GEX CSV (被 adapter 包装)
 │   ├── yahoo_finance_fetcher.py    # yfinance 做空数据 + CBOE VIX
 │   ├── finra_fetcher.py            # FINRA 管道文件短卖比
 │   ├── dbmf_fetcher.py             # DBMF ETF 动量监控
@@ -186,7 +196,12 @@ Multi-source Resonance/
 │   ├── docker-compose.yml          # Docker Compose 编排
 │   └── Dockerfile                  # 多阶段构建 (Node + Python)
 │
-├── tests/                          # 测试
+├── tests/                          # 测试 (241 tests)
+│   ├── test_source_status.py       # ★ 数据质量状态模型测试
+│   ├── test_stockgrid_adapter.py   # ★ Stockgrid 适配器测试
+│   ├── test_squeezemetrics_adapter.py  # ★ SqueezeMetrics 适配器测试
+│   ├── test_axlfi_adapter.py       # ★ AXLFI 适配器测试
+│   ├── test_monitor.py             # ★ 监控模块测试
 │   ├── test_phase5_signal_engine.py
 │   ├── test_backtest_engine.py
 │   ├── test_pipeline_integration.py
@@ -212,16 +227,20 @@ Multi-source Resonance/
 
 ## 数据源矩阵
 
-| 维度 | 子指标 | 主源 | 降级源 | 方式 | 频率 |
-|------|--------|------|--------|------|------|
-| **GEX/DIX** | GEX 总敞口、DIX 暗盘强度 | SqueezeMetrics CSV | — | REST 轮询 | 15min |
-| **VIX** | 期限结构 (VX1/VX2)、恐慌溢价 | CBOE 官方 (vix_utils) | — | REST 轮询 | 15min |
-| **Crypto** | BTC 资金费率、持仓量 | **Hyperliquid DEX WS** | CCData REST | **WebSocket Push** | 实时 |
-| **Darkpool** | 暗盘净头寸、底背离 | **AXLFI API** | — | REST 轮询 | 15min |
-| **做空** | shortFloat/ShortRatio | **yfinance** (免费) | FINRA 管道 | 盘后 | 日频 |
-| **DBMF** | MA5 均线收复 | yfinance | — | REST 轮询 | 15min |
+| 维度 | 子指标 | 主源 | 降级源 | 方式 | 频率 | 质量状态 |
+|------|--------|------|--------|------|------|----------|
+| **GEX/DIX** | GEX 总敞口、DIX 暗盘强度 | SqueezeMetrics CSV (Adapter) | — | REST 轮询 | 15min | ✅ CSV 契约校验 |
+| **VIX** | 期限结构 (VX1/VX2)、恐慌溢价 | CBOE 官方 (vix_utils) | — | REST 轮询 | 15min | ✅ 正常 |
+| **Crypto** | BTC 资金费率、持仓量 | **Hyperliquid DEX WS** | CCData REST | **WebSocket Push** | 实时 | ✅ 正常 |
+| **Darkpool** | 暗盘净头寸、底背离 | **AXLFI API** (Adapter) | — | REST 轮询 | 15min | ✅ tenacity 重试 |
+| **做空** | shortFloat/ShortRatio | **yfinance** (免费) | FINRA 管道 | 盘后 | 日频 | ✅ 正常 |
+| **DBMF** | MA5 均线收复 | yfinance | — | REST 轮询 | 15min | ✅ 正常 |
+| **Stockgrid** | 暗盘 DIX (历史) | Stockgrid (Adapter) | — | — | — | ⛔ UNAVAILABLE (已下线) |
 
 全部数据源 **免费**，无需付费 API Key 即可运行核心功能。
+
+> ★ 新增适配器层为 SqueezeMetrics / AXLFI / Stockgrid 提供统一 `SourceQualityReport` 输出，
+> 包含 `SourceStatus`、`ErrorCategory`、`latency_ms`、`structure_hash` 等质量标志。
 
 ---
 
@@ -360,6 +379,77 @@ SqueezeMetrics CSV (稳定, 公开)
 AXLFI 暗盘 API (免费公开)
 CBOE VIX (vix_utils, 官方)
 ```
+
+### 7. 数据质量与降级规范 (v2.1)
+
+#### 数据源质量状态模型 (`source_status.py`)
+
+```python
+class SourceStatus(Enum):
+    OK = "OK"                          # 正常
+    DEGRADED_NETWORK = "DEGRADED_NETWORK"  # 网络降级，可重试
+    STRUCTURE_CHANGED = "STRUCTURE_CHANGED"  # 结构变更，阻塞
+    CONTRACT_VIOLATION = "CONTRACT_VIOLATION"  # 契约违规，阻塞
+    UNAVAILABLE = "UNAVAILABLE"          # 完全不可用
+
+class ErrorCategory(Enum):
+    NETWORK = "NETWORK"       # 可重试 (HTTP 5xx, Timeout, ConnectionError)
+    STRUCTURE = "STRUCTURE"    # 不可重试 (KeyError, JSONDecodeError)
+    CONTRACT = "CONTRACT"     # 不可重试 (ValueError, HTTP 4xx)
+    UNKNOWN = "UNKNOWN"       # 不可重试
+```
+
+#### 适配器包装层
+
+| 适配器 | 原始 Fetcher | 增强能力 |
+|--------|-------------|---------|
+| **StockgridAdapter** | `stockgrid_fetcher.py` | 标记 UNAVAILABLE + DOM 结构哈希监控 |
+| **SqueezeMetricsAdapter** | `squeezemetrics_fetcher.py` | CSV 列/值/新鲜度契约校验 + 异常检测 (z-score) + 快照归档 |
+| **AxlfiAdapter** | `axlfi_fetcher.py` | tenacity 指数退避重试 (5s→15s→45s, max 3次) + API 结构校验 |
+
+所有适配器统一输出 `SourceQualityReport`：
+```python
+@dataclass
+class SourceQualityReport:
+    source_name: str
+    status: SourceStatus
+    error_category: ErrorCategory
+    last_verified_at: datetime
+    structure_hash: Optional[str]
+    structure_hash_changed: bool
+    latency_ms: float
+    error_detail: Optional[str]
+```
+
+#### 质量标志 Layer 1→2→3 全链路透传
+
+```
+Layer 1 (signal_pipeline):
+  _collect_darkpool_source_status() → 动态 available_sources + degradation_mode
+  
+Layer 2 (gateway/schemas):
+  ResonanceSnapshot.darkpool_source_status: Dict[str, str]
+  ResonanceSnapshot.darkpool_degradation_mode: NORMAL | DEGRADED | FALLBACK_ONLY_GEX
+  
+Layer 3 (llm_inference):
+  _build_darkpool_quality_note() → LLM Prompt 注入逐源状态
+```
+
+#### 暗盘降级联动
+
+| degradation_mode | 触发条件 | 评分行为 |
+|-----------------|---------|---------|
+| **NORMAL** | 所有暗盘源 OK | 正常 DIX+GEX+net_position 三选二聚合 |
+| **DEGRADED** | 部分源 UNAVAILABLE | 仅用可用源的信号，降级提示入 Prompt |
+| **FALLBACK_ONLY_GEX** | 全源失效 | 暗盘得分=0，共振退化为 GEX+VIX+Crypto 三维度 |
+
+全源失效时触发 `[CRITICAL] 暗盘数据全部失效 — 共振退化为 GEX+VIX+Crypto 模式！` 日志 + 多渠道高优告警。
+
+#### 监控审计 (`monitor.py`)
+
+- **每日统计**：成功率、平均延迟、结构变更次数
+- **连续不可用检测**：连续 N=3 日 success=0 → `send_critical_alert()`
+- **告警推送**：`alert_sender.py` 新增 `send_critical_alert()` 方法，多渠道 [CRITICAL] 推送
 
 ---
 
@@ -518,7 +608,7 @@ cd frontend && npx tsc --noEmit
 | **v1** (Phase 1-7) | APScheduler Pull 定时轮询 (`main_scheduler.py`) | DEPRECATED |
 | **v2** (Current) | WebSocket + EventBus Push 实时流 (`main_stream.py`) | Active |
 | **v2.0** | 三层解耦 (Layer1 数学 → Layer2 网关 → Layer3 LLM) | Active |
-| **v2.1** | Hawkes AR(1) 优化 + P2 前端增强 + C1/C2 数据源闭环 | Latest |
+| **v2.2** | 数据接入质量规范 + 适配器模式 + 暗盘降级联动 + 监控审计 | Latest |
 
 ### v1 → v2 核心变化
 
@@ -530,6 +620,7 @@ cd frontend && npx tsc --noEmit
 - **暗盘数据**：ChartExchange/Stockgrid → AXLFI (免费 API)
 - **Hawkes 模型**：corrcoef → AR(1) OLS 自回归
 - **V2.0 新增**：BS 向量化、数据校验防线、LLM 推理、跨资产共振、回测引擎
+- **V2.2 新增**：SourceStatus 数据质量模型、Stockgrid/SqueezeMetrics/AXLFI 适配器层、tenacity 重试、Layer 1→2→3 质量透传、暗盘动态降级联动、SourceHealthMonitor 监控审计
 
 ---
 
@@ -545,6 +636,6 @@ cd frontend && npx tsc --noEmit
 
 ---
 
-**当前版本**: v2.1  
-**最后更新**: 2026-06-09  
+**当前版本**: v2.2  
+**最后更新**: 2026-06-10  
 **入口文件**: `main_stream.py` | `api_server.py` | `run_pipeline_v2.py`

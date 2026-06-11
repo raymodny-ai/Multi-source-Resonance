@@ -330,7 +330,8 @@ class DarkPoolVerifier:
         divergence_flag: bool,
         slope_20d: float,
         slope_60d: float,
-        dbmf_recovery: bool = False
+        dbmf_recovery: bool = False,
+        quality_reports: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, any]:
         """完整暗盘验证流程
         
@@ -343,16 +344,32 @@ class DarkPoolVerifier:
             slope_20d: 20日斜率
             slope_60d: 60日斜率
             dbmf_recovery: DBMF收复标志
+            quality_reports: 可选, 各数据源质量报告 (规范 §5)
             
         Returns:
             dict: 完整验证结果
         """
+        # 如果提供了质量报告，标记不可用的源
+        source_availability = {}
+        if quality_reports:
+            for src, report_data in quality_reports.items():
+                status = report_data.get('status', 'OK') if isinstance(report_data, dict) else 'OK'
+                source_availability[src] = status in ('OK', 'DEGRADED_NETWORK')
+
         # 各维度单独检测
         dix_flag = self.check_dix_threshold(dix_value)
+        # 如果 SqueezeMetrics 不可用，DIX 信号强制 False
+        if quality_reports and not source_availability.get('squeezemetrics', True):
+            dix_flag = False
+
         short_ratio_flag = self.check_short_volume_consecutive(short_volume_days)
+
         stockgrid_flag = self.confirm_stockgrid_signal(
             divergence_flag, slope_20d, slope_60d
         )
+        # 如果 AXLFI 不可用，stockgrid 信号强制 False
+        if quality_reports and not source_availability.get('axlfi', True):
+            stockgrid_flag = False
         
         # 聚合信号
         aggregation = self.aggregate_darkpool_signals(
@@ -382,7 +399,8 @@ class DarkPoolVerifier:
             'aggregation': aggregation,
             'dbmf_recovery': dbmf_recovery,
             'final_score': score,
-            'signal_strength': self._interpret_score(score)
+            'signal_strength': self._interpret_score(score),
+            'source_availability': source_availability,
         }
     
     @staticmethod

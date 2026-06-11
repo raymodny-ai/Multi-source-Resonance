@@ -6,7 +6,7 @@ Multi-source Resonance V2.0 - Layer 2 网关 Schema 定义
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -155,6 +155,17 @@ class ResonanceSnapshot(BaseModel):
     missing_dimensions: List[str] = Field(
         default_factory=list,
         description="缺失维度列表",
+    )
+
+    # 暗盘逐源质量 (规范 §5 降级评分联动)
+    darkpool_source_status: Dict[str, str] = Field(
+        default_factory=dict,
+        description="暗盘各数据源质量状态 (axlfi/squeezemetrics/stockgrid → OK|DEGRADED_NETWORK|...)",
+    )
+    darkpool_degradation_mode: str = Field(
+        default="NORMAL",
+        description="暗盘降级模式",
+        examples=["NORMAL", "DEGRADED", "FALLBACK_ONLY_GEX"],
     )
 
     # 跨资产共振 (P2-1)

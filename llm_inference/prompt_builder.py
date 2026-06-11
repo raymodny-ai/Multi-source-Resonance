@@ -293,6 +293,54 @@ Your communication style:
 
         return "\n".join(sections)
 
+    def _build_darkpool_quality_note(self, snapshot) -> str:
+        """构建暗盘逐源质量上下文提示 (规范 §5)
+
+        当暗盘数据源出现降级时，为 LLM 注入逐源状态细节，
+        帮助策略师准确评估数据置信度。
+        """
+        if not snapshot.darkpool_source_status:
+            return ""
+
+        status = snapshot.darkpool_source_status
+        mode = snapshot.darkpool_degradation_mode
+
+        if mode == "NORMAL":
+            return ""
+
+        lines = ["\n\n📡 **Dark Pool Data Source Status**:"]
+
+        source_labels = {
+            "axlfi": "AXLFI (暗盘净头寸)",
+            "squeezemetrics": "SqueezeMetrics (DIX/GEX)",
+            "stockgrid": "Stockgrid (已下线)",
+        }
+
+        for src, state in status.items():
+            label = source_labels.get(src, src)
+            if state == "OK":
+                lines.append(f"  ✅ {label}: ONLINE")
+            elif state == "DEGRADED_NETWORK":
+                lines.append(f"  ⚠️ {label}: DEGRADED (网络延迟/降级)")
+            elif state == "UNAVAILABLE":
+                lines.append(f"  ❌ {label}: OFFLINE")
+            elif state == "STRUCTURE_CHANGED":
+                lines.append(f"  🔧 {label}: STRUCTURE CHANGED (需适配器更新)")
+            elif state == "CONTRACT_VIOLATION":
+                lines.append(f"  📋 {label}: DATA CONTRACT VIOLATION")
+            else:
+                lines.append(f"  ❓ {label}: {state}")
+
+        if mode == "FALLBACK_ONLY_GEX":
+            lines.append("\n⚠️ **ALL dark pool sources are unavailable.** "
+                         "Resonance is relying solely on GEX+VIX+Crypto dimensions.")
+            lines.append("Dark pool analysis in this briefing is UNRELIABLE.")
+        elif mode == "DEGRADED":
+            lines.append("\n⚠️ **One or more dark pool sources are degraded.** "
+                         "Cross-verify dark pool signals with extra caution.")
+
+        return "\n".join(lines)
+
     def build_user_prompt(
         self,
         envelope: GatewayEnvelope,
@@ -336,6 +384,9 @@ Your communication style:
         elif snapshot.data_quality_flag == "ERROR":
             quality_note = "\n\n❌ **CRITICAL: Data Feed Error detected.** Provide only a brief status summary."
 
+        # 暗盘逐源质量上下文 (规范 §5)
+        darkpool_quality_note = self._build_darkpool_quality_note(snapshot)
+
         # 经济事件
         events_section = ""
         if economic_events:
@@ -347,7 +398,7 @@ TARGET ASSET: {snapshot.underlying_asset}
 RESONANCE DATA:
 ```json
 {json_data}
-```{quality_note}{events_section}{few_shot_section}
+```{quality_note}{darkpool_quality_note}{events_section}{few_shot_section}
 
 Based SOLELY on the above JSON data, produce a professional derivatives strategy briefing covering:
 
@@ -459,6 +510,10 @@ Provide the same 5-section analysis as if this were a real-time briefing for {hi
 
         if s.missing_dimensions:
             lines.append(f"⚠️ Missing: {', '.join(s.missing_dimensions)}")
+
+        if s.darkpool_source_status:
+            lines.append(f"📡 Dark Pool Sources: {s.darkpool_source_status}")
+            lines.append(f"   Degradation Mode: {s.darkpool_degradation_mode}")
 
         if s.data_quality_flag != "NORMAL":
             lines.insert(1, "⚠️ LLM INFERENCE UNAVAILABLE — Degraded Mode Summary")
