@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useSystemStatus, createLogStream } from '../api/system'
+import { useSystemStatus, createLogStream, useTriggerManualCollect, useAutoPollingStatus, useSetAutoPolling } from '../api/system'
 import { formatRelativeTime } from '../utils/time'
 import type { SourceStatus } from '../types/api'
-import { Pause, Play, Trash2, AlertTriangle } from 'lucide-react'
+import { Pause, Play, Trash2, AlertTriangle, Download, Zap, ZapOff } from 'lucide-react'
 
 function SourceCard({ source }: { source: SourceStatus }) {
   const statusConfig = {
@@ -31,12 +31,63 @@ type LogEntry = { line: string; level: string; id: number }
 
 export default function SystemStatus() {
   const { data, isLoading, isError } = useSystemStatus()
+  const { data: pollingStatus } = useAutoPollingStatus()
+  const manualCollect = useTriggerManualCollect()
+  const setAutoPolling = useSetAutoPolling()
   const [logPaused, setLogPaused] = useState(false)
   const [errorOnly, setErrorOnly] = useState(false)
   const [logs, setLogs] = useState<LogEntry[]>([])
   const logEndRef = useRef<HTMLDivElement>(null)
   const logIdRef = useRef(0)
   const esRef = useRef<EventSource | null>(null)
+
+  // Toast notification state
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+
+  // Auto-polling state: sync from server, fallback to localStorage
+  const [localAutoPolling, setLocalAutoPolling] = useState<boolean>(() => {
+    const stored = localStorage.getItem('auto-polling-enabled')
+    return stored !== null ? stored === 'true' : true
+  })
+
+  // Sync server state to local when available
+  useEffect(() => {
+    if (pollingStatus !== undefined) {
+      setLocalAutoPolling(pollingStatus.enabled)
+      localStorage.setItem('auto-polling-enabled', String(pollingStatus.enabled))
+    }
+  }, [pollingStatus])
+
+  // Auto-polling derived from server or local fallback
+  const autoPollingEnabled = pollingStatus?.enabled ?? localAutoPolling
+
+  const handleToggleAutoPolling = useCallback(() => {
+    const next = !autoPollingEnabled
+    setLocalAutoPolling(next)
+    localStorage.setItem('auto-polling-enabled', String(next))
+    setAutoPolling.mutate(next)
+  }, [autoPollingEnabled, setAutoPolling])
+
+  const handleManualCollect = useCallback(() => {
+    manualCollect.mutate(undefined, {
+      onSuccess: (result) => {
+        setToast({
+          type: result.success_count === result.total_sources ? 'success' : 'error',
+          message: result.summary,
+        })
+      },
+      onError: (err) => {
+        setToast({ type: 'error', message: `手动采集失败: ${err.message}` })
+      },
+    })
+  }, [manualCollect])
+
+  // Auto-dismiss toast
+  useEffect(() => {
+    if (!toast) return
+    const timer = setTimeout(() => setToast(null), 5000)
+    return () => clearTimeout(timer)
+  }, [toast])
 
   // SSE log stream
   useEffect(() => {
@@ -68,9 +119,70 @@ export default function SystemStatus() {
     <div className="space-y-4 max-w-[1600px]">
       <h1 className="text-xl font-bold">系统状态监控</h1>
 
+      {/* Auto-polling disabled warning banner */}
+      {!autoPollingEnabled && (
+        <div className="bg-[var(--accent-yellow)]/10 border border-[var(--accent-yellow)]/30 rounded-xl p-3 flex items-center gap-2">
+          <AlertTriangle size={16} className="text-[var(--accent-yellow)] shrink-0" />
+          <span className="text-xs text-[var(--accent-yellow)] font-medium">
+            ⚠️ 自动轮询已暂停，数据可能过时，请手动采集
+          </span>
+        </div>
+      )}
+
+      {/* Toast notification */}
+      {toast && (
+        <div className={`rounded-xl p-3 flex items-center gap-2 transition-all animate-in slide-in-from-top-2 ${
+          toast.type === 'success' ? 'bg-[var(--accent-green)]/10 border border-[var(--accent-green)]/30' : 'bg-[var(--accent-red)]/10 border border-[var(--accent-red)]/30'
+        }`}>
+          <span className={`w-2 h-2 rounded-full ${toast.type === 'success' ? 'bg-[var(--accent-green)]' : 'bg-[var(--accent-red)]'}`} />
+          <span className={`text-xs ${toast.type === 'success' ? 'text-[var(--accent-green)]' : 'text-[var(--accent-red)]'}`}>{toast.message}</span>
+          <button onClick={() => setToast(null)} className="ml-auto text-[var(--text-secondary)] hover:text-white text-xs">✕</button>
+        </div>
+      )}
+
       {/* Data source connectivity matrix */}
       <section>
-        <h2 className="text-sm font-semibold mb-3">爬虫连通性矩阵</h2>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold">爬虫连通性矩阵</h2>
+          <div className="flex items-center gap-2">
+            {/* Auto-polling Toggle */}
+            <button
+              onClick={handleToggleAutoPolling}
+              disabled={setAutoPolling.isPending}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] rounded-lg font-medium transition-all ${
+                autoPollingEnabled
+                  ? 'bg-[var(--accent-green)]/15 text-[var(--accent-green)] border border-[var(--accent-green)]/30 hover:bg-[var(--accent-green)]/25'
+                  : 'bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)] border border-[var(--accent-yellow)]/30 hover:bg-[var(--accent-yellow)]/25'
+              }`}
+              title={autoPollingEnabled ? '自动轮询已开启' : '自动轮询已关闭'}
+            >
+              {autoPollingEnabled ? <Zap size={13} /> : <ZapOff size={13} />}
+              {autoPollingEnabled ? '自动轮询' : '已暂停'}
+            </button>
+
+            {/* Manual Collect Button */}
+            <button
+              onClick={handleManualCollect}
+              disabled={manualCollect.isPending}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] rounded-lg font-medium bg-[var(--accent-blue)] text-white hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              title="手动采集全部数据"
+            >
+              <Download size={13} className={manualCollect.isPending ? 'animate-spin' : ''} />
+              {manualCollect.isPending ? '采集中...' : '手动采集全部数据'}
+            </button>
+          </div>
+        </div>
+
+        {/* Manual collect progress indicator */}
+        {manualCollect.isPending && (
+          <div className="mb-3 flex items-center gap-2 bg-[var(--accent-blue)]/10 border border-[var(--accent-blue)]/20 rounded-lg px-3 py-2">
+            <Download size={12} className="text-[var(--accent-blue)] animate-spin" />
+            <span className="text-[11px] text-[var(--accent-blue)]">
+              正在采集: GEX/DIX · VIX期限结构 · AXLFI暗盘 · DBMF均线 · 加密衍生品 · 做空数据...
+            </span>
+          </div>
+        )}
+
         {isLoading ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3">
             {[1, 2, 3, 4, 5, 6, 7].map((i) => (

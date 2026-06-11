@@ -173,6 +173,8 @@ export interface SystemStatusData {
   scheduler_running: boolean
   db_size_mb: number
   last_backup_time: string
+  auto_polling_enabled: boolean
+  last_manual_collect: string | null
 }
 
 // --- 分页 ---
@@ -250,4 +252,29 @@ export interface IncidentDetail extends Incident {
 export interface TickerInfo {
   symbol: string
   name: string
+}
+
+// --- 手动采集 ---
+export interface ManualCollectSourceResult {
+  name: string
+  status: 'success' | 'empty' | 'error'
+  elapsed_sec: number
+  error?: string
+  data?: unknown
+}
+
+export interface ManualCollectResult {
+  ok: boolean
+  summary: string
+  success_count: number
+  total_sources: number
+  total_elapsed_sec: number
+  sources: ManualCollectSourceResult[]
+  collected_at: string
+  auto_polling_enabled: boolean
+}
+
+// --- 自动轮询 ---
+export interface AutoPollingStatus {
+  enabled: boolean
 }

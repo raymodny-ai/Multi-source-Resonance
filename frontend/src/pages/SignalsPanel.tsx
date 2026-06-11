@@ -21,37 +21,34 @@ export default function SignalsPanel() {
   const { data: historyData } = useSignalHistory(range)
   const acknowledge = useAcknowledgeSignal()
 
-  if (isLoading || !scores) {
-    return (
-      <div className="space-y-4">
-        <h1 className="text-xl font-bold">共振信号面板</h1>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="h-80 rounded-xl skeleton" />
-          <div className="h-80 rounded-xl skeleton" />
-        </div>
-      </div>
-    )
-  }
-
-  const { dimensions, resonance, hawkes } = scores
-  const { gex, vix, crypto, darkpool } = dimensions
+  const { dimensions, resonance, hawkes } = (scores ?? {}) as NonNullable<typeof scores>
+  const gex = dimensions?.gex
+  const vix = dimensions?.vix
+  const crypto = dimensions?.crypto
+  const darkpool = dimensions?.darkpool
 
   // Conditions
-  const conditions = [
-    { label: 'GEX 翻正', active: gex.score > 0, details: `GEX敞口 ${gex.state === 'FLIP_ON' ? '翻正 +$150M' : gex.details}`, color: '#22c55e' },
-    { label: 'VIX Contango', active: vix.score > 0, details: `VIX ${vix.state} Ratio ${vix.term_structure_ratio.toFixed(2)}`, color: '#22c55e' },
-    { label: 'CRYPTO 去杠杆', active: crypto.score > 0, details: crypto.leverage_cleanup_confirmed ? '去杠杆确认完成' : crypto.details, color: '#eab308' },
-    { label: 'DARKPOOL 3/3', active: darkpool.score > 0, details: darkpool.state === 'TRIGGERED_3OF3' ? '三驾马车全部触发' : darkpool.details, color: '#a855f7' },
-    { label: 'Hawkes 衰竭', active: hawkes.branching_ratio < 0.7, details: `分支比 ${hawkes.branching_ratio.toFixed(2)} ${HAWKES_STATE_LABELS[hawkes.state]}`, color: HAWKES_STATE_COLORS[hawkes.state] },
-  ]
+  const conditions = useMemo(() => {
+    if (!gex || !vix || !crypto || !darkpool || !hawkes) return []
+    return [
+      { label: 'GEX 翻正', active: gex.score > 0, details: `GEX敞口 ${gex.state === 'FLIP_ON' ? '翻正 +$150M' : gex.details}`, color: '#22c55e' },
+      { label: 'VIX Contango', active: vix.score > 0, details: `VIX ${vix.state} Ratio ${vix.term_structure_ratio.toFixed(2)}`, color: '#22c55e' },
+      { label: 'CRYPTO 去杠杆', active: crypto.score > 0, details: crypto.leverage_cleanup_confirmed ? '去杠杆确认完成' : crypto.details, color: '#eab308' },
+      { label: 'DARKPOOL 3/3', active: darkpool.score > 0, details: darkpool.state === 'TRIGGERED_3OF3' ? '三驾马车全部触发' : darkpool.details, color: '#a855f7' },
+      { label: 'Hawkes 衰竭', active: hawkes.branching_ratio < 0.7, details: `分支比 ${hawkes.branching_ratio.toFixed(2)} ${HAWKES_STATE_LABELS[hawkes.state]}`, color: HAWKES_STATE_COLORS[hawkes.state] },
+    ]
+  }, [gex, vix, crypto, darkpool, hawkes])
 
   // Ring segments
-  const ringSegments = [
-    { name: 'GEX', value: gex.score, max: 1.5, color: '#22c55e' },
-    { name: 'VIX', value: vix.score, max: 1.0, color: '#3b82f6' },
-    { name: 'Crypto', value: crypto.score, max: 1.0, color: '#eab308' },
-    { name: 'Darkpool', value: darkpool.score, max: 1.5, color: '#a855f7' },
-  ]
+  const ringSegments = useMemo(() => {
+    if (!gex || !vix || !crypto || !darkpool) return []
+    return [
+      { name: 'GEX', value: gex.score, max: 1.5, color: '#22c55e' },
+      { name: 'VIX', value: vix.score, max: 1.0, color: '#3b82f6' },
+      { name: 'Crypto', value: crypto.score, max: 1.0, color: '#eab308' },
+      { name: 'Darkpool', value: darkpool.score, max: 1.5, color: '#a855f7' },
+    ]
+  }, [gex, vix, crypto, darkpool])
 
   const totalMax = 5.0
   const ringRadius = 64
@@ -82,6 +79,18 @@ export default function SignalsPanel() {
     if (levelFilter === 'ALL') return allHistory
     return allHistory.filter((s) => s.alert_level === levelFilter)
   }, [allHistory, levelFilter])
+
+  if (isLoading || !scores) {
+    return (
+      <div className="space-y-4">
+        <h1 className="text-xl font-bold">共振信号面板</h1>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="h-80 rounded-xl skeleton" />
+          <div className="h-80 rounded-xl skeleton" />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4 max-w-[1600px]">

@@ -30,5 +30,12 @@ python-dotenv>=1.0.0
 # Timezone Handling
 pytz>=2023.3
 
-# Yahoo Finance Data
+# Yahoo Finance Data (做空数据 / short interest)
 yfinance>=0.2.30
+
+# VIX 期限结构 — CBOE 官方数据 (替代已弃用的 Yahoo Finance VIX 期货符号)
+vix_utils>=0.1.7
+
+# Web API Server
+fastapi>=0.110.0
+uvicorn>=0.27.0

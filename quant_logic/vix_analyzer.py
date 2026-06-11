@@ -6,6 +6,11 @@
 - 恐慌溢价计算
 - VIX维度信号分值评估
 
+数据源: vix_utils → CBOE 官方 CSV (2004年至今每日数据)
+  - VIX 现货: get_vix_index_histories()
+  - VIX 期货全曲线: load_vix_term_structure() (多月份 Tenor_Days)
+  - 30天常量到期日连续曲线: continuous_maturity_one_month()
+
 VIX期限结构是市场情绪的重要指标:
 - Contango(期货>现货): 正常市场状态,投资者愿意支付溢价购买未来保护
 - Backwardation(期货<现货): 恐慌状态,投资者急需即时保护

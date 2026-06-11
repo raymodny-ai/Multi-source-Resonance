@@ -58,6 +58,7 @@ class RESTPollScheduler:
         self._executor = ThreadPoolExecutor(max_workers=4)
         self._tasks: List[asyncio.Task] = []
         self._running = False
+        self._paused = False  # 自动轮询暂停标志
 
         # 延迟导入数据获取器 (避免循环依赖)
         self._squeezemetrics = None
@@ -71,6 +72,24 @@ class RESTPollScheduler:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
+
+    def pause(self) -> None:
+        """暂停所有自动轮询任务 (任务继续运行但跳过数据采集)"""
+        if self._paused:
+            return
+        self._paused = True
+        logger.warning("[AUTO_POLLING] 自动轮询已暂停 — 只有手动采集可用")
+
+    def resume(self) -> None:
+        """恢复自动轮询"""
+        if not self._paused:
+            return
+        self._paused = False
+        logger.info("[AUTO_POLLING] 自动轮询已恢复")
 
     async def start(self) -> None:
         """启动所有轮询任务"""
@@ -160,6 +179,11 @@ class RESTPollScheduler:
 
         while self._running:
             try:
+                # 暂停检查: 自动轮询关闭时休眠等待
+                if self._paused:
+                    await asyncio.sleep(1)
+                    continue
+
                 if not self._is_market_hours() or not self._is_weekday():
                     await asyncio.sleep(60)
                     interval = POLL_INTERVAL_INTRADAY
@@ -212,6 +236,11 @@ class RESTPollScheduler:
 
         while self._running:
             try:
+                # 暂停检查: 自动轮询关闭时休眠等待
+                if self._paused:
+                    await asyncio.sleep(1)
+                    continue
+
                 if not self._is_market_hours() or not self._is_weekday():
                     await asyncio.sleep(60)
                     interval = POLL_INTERVAL_INTRADAY
@@ -275,6 +304,11 @@ class RESTPollScheduler:
 
         while self._running:
             try:
+                # 暂停检查: 自动轮询关闭时休眠等待
+                if self._paused:
+                    await asyncio.sleep(1)
+                    continue
+
                 if not self._is_market_hours() or not self._is_weekday():
                     await asyncio.sleep(60)
                     interval = POLL_INTERVAL_INTRADAY
@@ -366,6 +400,11 @@ class RESTPollScheduler:
 
         while self._running:
             try:
+                # 暂停检查: 自动轮询关闭时休眠等待
+                if self._paused:
+                    await asyncio.sleep(1)
+                    continue
+
                 if not self._is_market_hours() or not self._is_weekday():
                     await asyncio.sleep(60)
                     interval = POLL_INTERVAL_INTRADAY
@@ -465,3 +504,132 @@ class RESTPollScheduler:
 
         except Exception as e:
             logger.error(f"盘后做空数据任务失败: {e}", exc_info=True)
+
+    # ================================================================
+    # 手动采集: 一次性执行所有轮询 (忽略暂停/市场时间限制)
+    # ================================================================
+
+    async def run_once_manual_collect(self) -> Dict[str, Any]:
+        """手动触发一次完整的盘中数据采集循环
+
+        忽略自动轮询暂停状态和市场时间限制，
+        并发执行所有数据源采集。
+
+        Returns:
+            dict: 每个数据源的采集结果 {"name": str, "status": str, "elapsed_sec": float, ...}
+        """
+        import time as _time
+        start_ts = _time.time()
+        results = []
+        success_count = 0
+
+        logger.info("[MANUAL] RESTPollScheduler 手动采集开始...")
+        self._load_fetchers()
+
+        # 强制刷新 VIX 缓存 (确保手动采集获取最新 CBOE 数据)
+        try:
+            from data_fetchers.yahoo_finance_fetcher import YahooFinanceFetcher
+            YahooFinanceFetcher.invalidate_vix_cache()
+        except Exception:
+            pass
+
+        async def _collect_one(name: str, coro):
+            t0 = _time.time()
+            try:
+                await coro
+                elapsed = round(_time.time() - t0, 2)
+                return {"name": name, "status": "success", "elapsed_sec": elapsed}
+            except Exception as e:
+                elapsed = round(_time.time() - t0, 2)
+                logger.error(f"[MANUAL] {name} 采集失败: {e}")
+                return {"name": name, "status": "error", "elapsed_sec": elapsed, "error": str(e)}
+
+        # 并发执行所有采集任务
+        tasks = [
+            _collect_one("GEX/DIX", self._poll_gex_dix_once()),
+            _collect_one("VIX期限结构", self._poll_vix_once()),
+            _collect_one("AXLFI暗盘", self._poll_axlfi_once()),
+            _collect_one("DBMF均线", self._poll_dbmf_once()),
+        ]
+        results = list(await asyncio.gather(*tasks))
+        success_count = sum(1 for r in results if r.get("status") == "success")
+
+        total_sources = len(results)
+        total_elapsed = round(_time.time() - start_ts, 2)
+
+        summary = f"[MANUAL] RESTPollScheduler 手动采集完成: {success_count}/{total_sources} 成功, 耗时 {total_elapsed}s"
+        logger.info(summary)
+
+        return {
+            "summary": summary,
+            "success_count": success_count,
+            "total_sources": total_sources,
+            "total_elapsed_sec": total_elapsed,
+            "sources": results,
+        }
+
+    async def _poll_gex_dix_once(self):
+        """单次 GEX/DIX 采集 (忽略市场时间)"""
+        loop = asyncio.get_event_loop()
+        metrics = await loop.run_in_executor(
+            self._executor, self._squeezemetrics.get_full_metrics
+        )
+        if metrics:
+            await self._bus.publish(Topics.GEX_UPDATE, {
+                'gex': metrics.get('gex', 0.0),
+                'dix': metrics.get('dix', 0.0),
+                'price': metrics.get('price', 0.0),
+                'timestamp': datetime.now(),
+            })
+
+    async def _poll_vix_once(self):
+        """单次 VIX 采集"""
+        loop = asyncio.get_event_loop()
+        vx1 = await loop.run_in_executor(self._executor, self._yahoo.get_vix_futures, 'VX1')
+        vx2 = await loop.run_in_executor(self._executor, self._yahoo.get_vix_futures, 'VX2')
+        vix_spot = await loop.run_in_executor(self._executor, self._yahoo.get_vix_spot)
+        if all([vx1, vx2, vix_spot]):
+            await self._bus.publish(Topics.VIX_TERM_STRUCTURE, {
+                'spot': vix_spot, 'vx1': vx1, 'vx2': vx2, 'timestamp': datetime.now(),
+            })
+
+    async def _poll_axlfi_once(self):
+        """单次 AXLFI 采集"""
+        loop = asyncio.get_event_loop()
+        symbol_data = await loop.run_in_executor(
+            self._executor, lambda: self._axlfi.fetch_symbol_data('SPY', 120)
+        )
+        if symbol_data:
+            dp_position = symbol_data.get('dollar_dp_position', [])
+            close_prices = symbol_data.get('close', [])
+            if len(dp_position) >= 60:
+                divergence_result = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self._axlfi.detect_bottom_divergence(
+                        dp_position[-120:] if len(dp_position) >= 120 else dp_position,
+                        close_prices[-120:] if close_prices and len(close_prices) >= 120 else dp_position[-120:],
+                    ),
+                )
+                await self._bus.publish(Topics.DARKPOOL_AXLFI, {
+                    'dollar_dp_position': dp_position,
+                    'close': close_prices,
+                    'divergence': divergence_result.get('divergence', False),
+                    'slope_20d': divergence_result.get('slope_20d', 0.0),
+                    'slope_60d': divergence_result.get('slope_60d', 0.0),
+                    'golden_cross': divergence_result.get('golden_cross', False),
+                    'short_volume_pct': symbol_data.get('short_volume_pct', []),
+                    'timestamp': datetime.now(),
+                })
+
+    async def _poll_dbmf_once(self):
+        """单次 DBMF 采集"""
+        loop = asyncio.get_event_loop()
+        current_price = await loop.run_in_executor(self._executor, self._dbmf.get_dbmf_intraday_price)
+        historical_prices = await loop.run_in_executor(
+            self._executor, lambda: self._dbmf.get_dbmf_historical_prices(days=10)
+        )
+        if current_price and historical_prices:
+            recovery = await loop.run_in_executor(
+                self._executor, self._dbmf.check_ma5_recovery, current_price, historical_prices
+            )
+            await self._bus.publish(Topics.DBMF_RECOVERY, {'recovery': recovery, 'price': current_price})

@@ -1,13 +1,14 @@
-import { useMemo, useState, useEffect, useCallback } from 'react'
+import { useMemo, useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDashboardScores, useRecentAlerts } from '../api/dashboard'
 import { useStalenessStore } from '../stores/stalenessStore'
+import { useAutoPollingStatus } from '../api/system'
 import { formatCurrency, formatPercent, formatDecimal, formatOI } from '../utils/format'
 import { formatTime, formatRelativeTime } from '../utils/time'
 import { ALERT_LEVEL_COLORS, ALERT_LEVEL_LABELS, HAWKES_STATE_COLORS, HAWKES_STATE_LABELS } from '../types/common'
 import type { AlertLevel } from '../types/common'
 import type { DashboardScores } from '../types/api'
-import { Pause, Play, RefreshCw } from 'lucide-react'
+import { Pause, Play, RefreshCw, AlertTriangle } from 'lucide-react'
 
 function HawkesProgressBar({ branchingRatio, state }: { branchingRatio: number; state: string }) {
   const pct = Math.min((branchingRatio / 1.0) * 100, 100)
@@ -55,6 +56,26 @@ export default function Dashboard() {
 
   const { data, isLoading, isError, refetch } = useDashboardScores()
   const { data: recentAlerts } = useRecentAlerts(5)
+  const { data: pollingStatus } = useAutoPollingStatus()
+
+  // Track when auto-polling was last disabled
+  const autoPollingOffSince = useRef<number | null>(null)
+  useEffect(() => {
+    if (pollingStatus && !pollingStatus.enabled) {
+      if (autoPollingOffSince.current === null) {
+        autoPollingOffSince.current = Date.now()
+      }
+    } else {
+      autoPollingOffSince.current = null
+    }
+  }, [pollingStatus])
+
+  // Auto-polling stale: disabled > 30 minutes
+  const autoPollingStale =
+    pollingStatus &&
+    !pollingStatus.enabled &&
+    autoPollingOffSince.current !== null &&
+    (Date.now() - autoPollingOffSince.current) > 30 * 60 * 1000
 
   // Track staleness
   useEffect(() => {
@@ -121,6 +142,11 @@ export default function Dashboard() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold text-[var(--text-primary)]">实时仪表盘</h1>
         <div className="flex items-center gap-2">
+          {autoPollingStale && (
+            <span className="text-[var(--accent-yellow)]" title="自动轮询已关闭超过30分钟，数据严重过时">
+              <AlertTriangle size={14} />
+            </span>
+          )}
           <span className={`text-[10px] flex items-center gap-1 ${isStale ? 'text-[var(--accent-yellow)]' : 'text-[var(--accent-green)]'}`}>
             <span className={`w-1.5 h-1.5 rounded-full ${isStale ? 'bg-[var(--accent-yellow)] animate-pulse' : 'bg-[var(--accent-green)]'}`} />
             {isStale ? `延迟 ${staleSeconds}s` : 'LIVE'}

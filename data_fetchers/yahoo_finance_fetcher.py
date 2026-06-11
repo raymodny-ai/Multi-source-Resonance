@@ -1,23 +1,30 @@
 """
 多源共振监控系统 - Yahoo Finance 数据获取器
 
-该模块负责从Yahoo Finance获取VIX现货/期货价格和做空数据，
+该模块负责获取VIX现货/期货价格和做空数据，
 用于计算波动率期限结构、市场恐慌程度和量化选股过滤。
 
 主要功能:
-- 获取VIX现货指数价格 (^VIX)
-- 获取VIX近月和次月期货价格 (VX=F, VX2=F)
+- 获取VIX现货指数价格 (^VIX) — vix_utils (CBOE 官方数据)
+- 获取VIX近月和次月期货价格 (VX1/VX2) — vix_utils (CBOE 官方数据)
 - 计算VIX期限结构比率 (VX1/VX2)
 - 判断Contango/Backwardation市场状态
 - 获取做空数据 (shortPercentOfFloat / shortRatio / sharesShort) — yfinance库
 
-API端点: https://query1.finance.yahoo.com/v8/finance/chart/{symbol}
+数据源迁移:
+  v2.0: Yahoo Finance → CBOE vix_utils (2024年起 Yahoo 已弃用 VIX 期货符号)
+  vix_utils 专为 VIX 回测设计，直接从 CBOE 官网下载历史 CSV 并清洗为 DataFrame
+  提供 2004 年至今的全曲线期限结构 & 30天常量到期日连续曲线
+
 做空数据: yfinance.Ticker(symbol).info (免费, 无API Key, 覆盖美股全量标的)
 """
 
 import requests
 from requests.exceptions import Timeout, ConnectionError, HTTPError
 from typing import Optional, Dict, Any
+
+import pandas as pd
+
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from utils.logger import getLogger
 from utils.exceptions import DataFetchError
@@ -30,32 +37,41 @@ except ImportError:
     _YFINANCE_AVAILABLE = False
     yf = None
 
+try:
+    import vix_utils
+    _VIX_UTILS_AVAILABLE = True
+except ImportError:
+    _VIX_UTILS_AVAILABLE = False
+
 logger = getLogger('yahoo_finance_fetcher')
 
 
 class YahooFinanceFetcher:
-    """Yahoo Finance VIX期货数据获取器
+    """VIX + 做空数据获取器
     
-    通过Yahoo Finance公共API获取VIX波动率指数及其期货合约价格。
-    主要用于监控市场恐慌情绪和期限结构变化。
+    VIX 数据: 通过 vix_utils (CBOE 官方 CSV) 获取
+    做空数据: 通过 yfinance 获取
     
     Attributes:
-        base_url: Yahoo Finance API基础URL
-        timeout: 请求超时时间(秒)
         mock_mode: Mock模式开关
+        _vix_cache: VIX DataFrame 缓存 (避免重复下载)
     """
     
+    # VIX 数据缓存 (类级别共享，避免每次实例化都重新下载)
+    _futures_cache: Optional[Any] = None
+    _spot_cache: Optional[Any] = None
+    _cache_ts: float = 0.0
+    _CACHE_TTL_SEC: float = 300.0  # 5分钟缓存有效期
+
     def __init__(self, mock_mode: bool = False):
-        """初始化Yahoo Finance数据获取器
+        """初始化数据获取器
         
         Args:
             mock_mode: Mock模式开关，用于无网络连接时的测试
         """
-        self.base_url = "https://query1.finance.yahoo.com/v8/finance/chart"
-        self.timeout = Config.REQUEST_TIMEOUT
         self.mock_mode = mock_mode
         
-        logger.info(f"YahooFinanceFetcher初始化完成 (mock_mode={mock_mode})")
+        logger.info(f"YahooFinanceFetcher初始化完成 (mock_mode={mock_mode}, vix_utils={'✓' if _VIX_UTILS_AVAILABLE else '✗'})")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -64,76 +80,32 @@ class YahooFinanceFetcher:
         reraise=True
     )
     def get_vix_spot(self) -> Optional[float]:
-        """获取VIX现货指数价格
+        """获取VIX现货指数价格 — vix_utils (CBOE 官方数据)
         
-        从Yahoo Finance获取CBOE波动率指数(^VIX)的实时价格。
-        VIX是衡量S&P 500指数未来30天预期波动率的指标。
+        从 CBOE 历史波动率指数 CSV 中提取最新 VIX 收盘价。
+        vix_utils 自动完成下载→清洗→DataFrame 全流程。
         
         Returns:
             float: VIX现货价格，失败时返回None
-            
-        Raises:
-            DataFetchError: API请求失败时抛出（经重试后仍失败）
-            
-        Examples:
-            >>> fetcher = YahooFinanceFetcher()
-            >>> vix_price = fetcher.get_vix_spot()
-            >>> if vix_price:
-            ...     print(f"当前VIX指数: {vix_price:.2f}")
         """
         if self.mock_mode:
             logger.warning("Mock模式: 返回模拟VIX现货价格")
             return self._get_mock_vix_spot()
-        
-        symbol = "^VIX"
-        url = f"{self.base_url}/{symbol}"
-        params = {
-            'range': '1d',
-            'interval': '1m'
-        }
-        
+
         try:
-            logger.info(f"请求Yahoo Finance API: symbol={symbol}")
-            response = requests.get(
-                url,
-                params=params,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            # 解析价格数据
-            result = data.get('chart', {}).get('result', [])
-            if not result:
-                logger.error("API响应中缺少结果数据")
+            spot_df = self._load_vix_spot_data()
+            if spot_df is None:
                 return None
-            
-            meta = result[0].get('meta', {})
-            current_price = meta.get('regularMarketPrice')
-            
-            if current_price is None:
-                logger.error("无法获取VIX现货价格")
+            vix_rows = spot_df[spot_df['Symbol'] == 'VIX']
+            if len(vix_rows) == 0:
+                logger.error("vix_utils 返回的现货数据中未找到 VIX 符号")
                 return None
-            
-            price = float(current_price)
-            logger.debug(f"成功获取VIX现货价格: {price:.2f}")
+            latest = vix_rows.iloc[-1]
+            price = float(latest['Close'])
+            logger.debug(f"vix_utils: VIX 现货 = {price:.2f} (日期: {latest['Trade Date']})")
             return price
-            
-        except Timeout as e:
-            logger.error(f"Request timeout for VIX spot: {e}")
-            return None
-        except ConnectionError as e:
-            logger.error(f"Connection error for VIX spot: {e}")
-            return None
-        except HTTPError as e:
-            logger.error(f"HTTP error {e.response.status_code} for VIX spot: {e}")
-            return None
-        except ValueError as e:
-            logger.error(f"JSON decode error for VIX spot: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Unexpected error fetching VIX spot price: {e}", exc_info=True)
+            logger.error(f"vix_utils VIX 现货获取失败: {e}", exc_info=True)
             return None
     
     @retry(
@@ -143,89 +115,46 @@ class YahooFinanceFetcher:
         reraise=True
     )
     def get_vix_futures(self, contract: str = 'VX1') -> Optional[float]:
-        """获取VIX期货合约价格
+        """获取VIX期货合约价格 — vix_utils (CBOE 官方数据)
         
-        从Yahoo Finance获取指定月份的VIX期货价格。
+        从 CBOE VIX 期货历史 CSV 中提取近月/次月结算价。
+        vix_utils 自动下载多月份期货合约并拼接到统一 DataFrame。
         
         Args:
             contract: 期货合约标识
-                - 'VX1': 近月期货 (VX=F)
-                - 'VX2': 次月期货 (需确认真实符号，可能为VXM=F或VXN=F)
+                - 'VX1': 近月期货 (Tenor_Days 最小)
+                - 'VX2': 次月期货 (Tenor_Days 次小)
                 
         Returns:
-            float: 期货价格，失败时返回None
-            
-        Raises:
-            DataFetchError: API请求失败时抛出
-            
-        Examples:
-            >>> fetcher = YahooFinanceFetcher()
-            >>> vx1_price = fetcher.get_vix_futures('VX1')
-            >>> vx2_price = fetcher.get_vix_futures('VX2')
+            float: 期货结算价 (Settle)，失败时返回None
         """
         if self.mock_mode:
             logger.warning(f"Mock模式: 返回模拟{contract}期货价格")
             return self._get_mock_vix_futures(contract)
-        
-        # 映射合约符号到Yahoo Finance ticker
-        contract_map = {
-            'VX1': 'VX=F',   # 近月期货
-            'VX2': 'VXM=F',  # 次月期货 (TODO: 需通过浏览器F12确认准确符号)
-        }
-        
-        symbol = contract_map.get(contract)
-        if not symbol:
-            logger.error(f"未知的期货合约: {contract}")
-            raise ValueError(f"不支持的期货合约: {contract}，支持的合约: {list(contract_map.keys())}")
-        
-        url = f"{self.base_url}/{symbol}"
-        params = {
-            'range': '1d',
-            'interval': '1m'
-        }
-        
+
         try:
-            logger.info(f"请求Yahoo Finance API: symbol={symbol} ({contract})")
-            response = requests.get(
-                url,
-                params=params,
-                timeout=self.timeout
+            futures_df = self._load_vix_futures_data()
+            if futures_df is None:
+                return None
+
+            latest_date = futures_df['Trade Date'].max()
+            today_fs = futures_df[futures_df['Trade Date'] == latest_date].sort_values('Tenor_Days')
+
+            if len(today_fs) < 2:
+                logger.error(f"vix_utils: 最新日期 ({latest_date.date()}) 期货合约不足2个")
+                return None
+
+            idx = 0 if contract == 'VX1' else 1
+            row = today_fs.iloc[idx]
+            price = float(row['Settle']) if not pd.isna(row['Settle']) else float(row['Close'])
+            logger.debug(
+                f"vix_utils: {contract} = {price:.2f} "
+                f"({row['Futures']}, Tenor={row['Tenor_Days']}天, 日期={latest_date.date()})"
             )
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            # 解析价格数据
-            result = data.get('chart', {}).get('result', [])
-            if not result:
-                logger.error(f"API响应中缺少{contract}期货结果数据")
-                return None
-            
-            meta = result[0].get('meta', {})
-            current_price = meta.get('regularMarketPrice')
-            
-            if current_price is None:
-                logger.error(f"无法获取{contract}期货价格")
-                return None
-            
-            price = float(current_price)
-            logger.debug(f"成功获取{contract}期货价格: {price:.2f}")
             return price
-            
-        except Timeout as e:
-            logger.error(f"Request timeout for {contract}: {e}")
-            return None
-        except ConnectionError as e:
-            logger.error(f"Connection error for {contract}: {e}")
-            return None
-        except HTTPError as e:
-            logger.error(f"HTTP error {e.response.status_code} for {contract}: {e}")
-            return None
-        except ValueError as e:
-            logger.error(f"JSON decode error for {contract}: {e}")
-            return None
+
         except Exception as e:
-            logger.error(f"Unexpected error fetching {contract} futures price: {e}", exc_info=True)
+            logger.error(f"vix_utils {contract} 获取失败: {e}", exc_info=True)
             return None
     
     def calculate_term_structure_ratio(self) -> Optional[float]:
@@ -304,7 +233,70 @@ class YahooFinanceFetcher:
             base_price += random.uniform(0.5, 2.0)
         
         return round(base_price, 2)
-    
+
+    # ================================================================
+    # VIX 数据加载 — vix_utils 缓存层
+    # ================================================================
+
+    @classmethod
+    def _load_vix_futures_data(cls):
+        """加载 VIX 期货期限结构 DataFrame (带缓存)
+        
+        缓存有效期 5 分钟，避免每次调用都重新下载 CBOE CSV。
+        """
+        import time as _time
+        if (
+            cls._futures_cache is not None
+            and (_time.time() - cls._cache_ts) < cls._CACHE_TTL_SEC
+        ):
+            return cls._futures_cache
+
+        if not _VIX_UTILS_AVAILABLE:
+            logger.error("vix_utils 未安装，无法获取 VIX 期货数据。pip install vix_utils")
+            return None
+
+        try:
+            logger.info("vix_utils: 加载 VIX 期货期限结构 (CBOE CSV)...")
+            cls._futures_cache = vix_utils.load_vix_term_structure()
+            cls._cache_ts = _time.time()
+            logger.info(f"vix_utils: 期货数据加载完成 ({len(cls._futures_cache)} 行)")
+            return cls._futures_cache
+        except Exception as e:
+            logger.error(f"vix_utils 期货数据加载失败: {e}", exc_info=True)
+            return None
+
+    @classmethod
+    def _load_vix_spot_data(cls):
+        """加载 VIX 现货历史数据 DataFrame (带缓存)"""
+        import time as _time
+        if (
+            cls._spot_cache is not None
+            and (_time.time() - cls._cache_ts) < cls._CACHE_TTL_SEC
+        ):
+            return cls._spot_cache
+
+        if not _VIX_UTILS_AVAILABLE:
+            logger.error("vix_utils 未安装，无法获取 VIX 现货数据。pip install vix_utils")
+            return None
+
+        try:
+            logger.info("vix_utils: 加载 VIX 现货指数历史 (CBOE CSV)...")
+            cls._spot_cache = vix_utils.get_vix_index_histories()
+            cls._cache_ts = _time.time()
+            logger.info(f"vix_utils: 现货数据加载完成 ({len(cls._spot_cache)} 行)")
+            return cls._spot_cache
+        except Exception as e:
+            logger.error(f"vix_utils 现货数据加载失败: {e}", exc_info=True)
+            return None
+
+    @classmethod
+    def invalidate_vix_cache(cls) -> None:
+        """强制清除 VIX 缓存 (手动采集时使用)"""
+        cls._futures_cache = None
+        cls._spot_cache = None
+        cls._cache_ts = 0.0
+        logger.info("vix_utils: VIX 缓存已手动清除")
+
     # ================================================================
     # 做空数据 (yfinance — 替代已删除的 FMP)
     # ================================================================
