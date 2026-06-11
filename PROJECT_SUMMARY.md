@@ -79,18 +79,24 @@
 - ✅ quant_logic/vix_analyzer.py - VIX期限结构分析器
 - ✅ quant_logic/crypto_leverage_cleaner.py - 加密杠杆清洗判定引擎
 - ✅ quant_logic/darkpool_verifier.py - 暗盘三驾马车验证引擎
+- ✅ 🆕 quant_logic/darkpool_preprocessor.py - 暗盘EMA降噪+拐点检测 (v2.1)
 
-**代码量**: ~1,800行  
+**代码量**: ~2,230行  
 **技术亮点**:
 - Black-Scholes Delta/Gamma向量化计算
 - Flip Zone与Put Wall识别
 - OI断崖式下跌检测(>15%)
 - 三选二投票机制聚合
+- 🆕 EMA快慢双线平滑 (V_net span=5/20)
+- 🆕 零轴穿越因子 (BULLISH/BEARISH)
+- 🆕 动量加速度因子 (早期抛售预警)
 
 **核心算法**:
 - GEX = Σ(gamma_i × 100 × open_interest_i × spot_price²)
 - VIX期限结构比值 = VX1/VX2
 - Hawkes Process分支比估算
+- V_net = 2×V_short − V_total (净做空量)
+- EMA_t = α·X_t + (1−α)·EMA_{t-1}
 
 ---
 
@@ -464,6 +470,6 @@ python main_scheduler.py
 
 ---
 
-**最后更新**: 2026-06-09 (vix_utils迁移 + 前端手动采集功能)  
+**最后更新**: 2026-06-09 (vix_utils迁移 + 前端手动采集 + 暗盘EMA预处理)  
 **版本**: v2.1.0  
-**状态**: ✅ Phase 1-7核心功能 + 前端Web UI + vix_utils CBOE数据源 + 手动采集/轮询控制
+**状态**: ✅ Phase 1-7核心 + 前端Web UI + vix_utils CBOE + 暗盘EMA预处理(零轴穿越/动量反转)

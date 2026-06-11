@@ -117,7 +117,8 @@ Multi-source Resonance/
 │   ├── gex_calculator.py         # Gamma Exposure 计算
 │   ├── vix_analyzer.py           # VIX 期限结构分析
 │   ├── crypto_leverage_cleaner.py # 加密杠杆清洗判定
-│   └── darkpool_verifier.py      # 暗盘三驾马车验证
+│   ├── darkpool_verifier.py      # 暗盘三驾马车验证
+│   ├── darkpool_preprocessor.py  # 暗盘EMA降噪 + 零轴穿越/动量反转 (v2.1)
 ├── signal_engine/                # 信号引擎
 │   ├── resonance_scorer.py       # 多维度共振评分 (0~5.0)
 │   └── signal_trigger.py         # 信号状态机 + 冷却期管理
@@ -217,6 +218,7 @@ RESTPoll → dbmf.recovery ─────────────┘
 | `VIXAnalyzer` | 期限结构分析、Contango/Backwardation 判定 | 结构比率、恐慌溢价 |
 | `CryptoLeverageCleaner` | OI 暴跌检测、资金费率异常、ELR 安全判定 | 去杠杆完成标志 |
 | `DarkPoolVerifier` | 暗盘底背离信号验证、黄金交叉检测 | 净流入确认 |
+| `DarkPoolPreprocessor` | 净做空量 EMA 降噪 + 零轴穿越/动量反转 | EMA-5/EMA-20 双线、拐点信号 |
 
 ### 3. 信号引擎 (`signal_engine/`)
 
@@ -227,7 +229,7 @@ RESTPoll → dbmf.recovery ─────────────┘
 | **GEX** | 1.5 分 | GEX 由负翻正 (POSITIVE) |
 | **VIX** | 1.0 分 | 回归 Contango 且斜率向下 |
 | **Crypto** | 1.0 分 | OI 暴跌 + 费率转正 + 去杠杆完成 |
-| **Darkpool** | 1.5 分 | 三选二聚合 + DBMF 收复 |
+| **Darkpool** | 三选二聚合 + DBMF 收复 | **1.5 分** | v2.1: 叠加 EMA 预处理加成 (零轴穿越 +0.25 / 动量反转 +0.15) |
 | **总分** | **5.0 分** | |
 
 预警级别：
@@ -409,6 +411,6 @@ python verify_setup.py
 本项目仅供学习和研究使用。
 
 ---
-**当前版本**: v2.1 (Push 实时流 + FastAPI + React 前端)  
+**当前版本**: v2.1 (Push 实时流 + FastAPI + React 前端 + 暗盘 EMA 预处理)  
 **最后更新**: 2026-06-09  
 **入口文件**: `main_stream.py` / `api_server.py` / `frontend/`
