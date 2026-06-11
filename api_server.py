@@ -343,7 +343,7 @@ async def manual_collect():
         dbmf = DBMFFetcher()
         def _fetch_dbmf():
             price = dbmf.get_dbmf_intraday_price()
-            hist = dbmf.get_dbmf_historical_prices(days=10)
+            hist = dbmf.get_dbmf_historical_prices(period='10d')
             if price:
                 recovery = dbmf.check_ma5_recovery(price, hist) if hist else False
                 return {"price": price, "ma5_recovery": recovery}
