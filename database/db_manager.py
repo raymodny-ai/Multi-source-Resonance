@@ -969,17 +969,17 @@ class DatabaseManager:
     def get_latest_vix_analysis(self):
         """获取最新VIX分析记录"""
         try:
-            cursor = self._get_cursor()
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='vix_analysis'"
-            )
-            if not cursor.fetchone():
-                return None
-            cursor.execute(
-                "SELECT * FROM vix_analysis ORDER BY timestamp DESC LIMIT 1"
-            )
-            row = cursor.fetchone()
-            return self._row_to_dict(row)
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='vix_analysis'"
+                )
+                if not cursor.fetchone():
+                    return None
+                cursor.execute(
+                    "SELECT * FROM vix_analysis ORDER BY timestamp DESC LIMIT 1"
+                )
+                row = cursor.fetchone()
+                return self._row_to_dict(row)
         except Exception as e:
             logger.error(f"查询最新VIX失败: {e}")
             return None
@@ -995,12 +995,12 @@ class DatabaseManager:
     def get_latest_signal(self):
         """获取最新信号记录"""
         try:
-            cursor = self._get_cursor()
-            cursor.execute(
-                "SELECT * FROM signal_alerts ORDER BY trigger_time DESC LIMIT 1"
-            )
-            row = cursor.fetchone()
-            return self._row_to_dict(row)
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM signal_alerts ORDER BY trigger_time DESC LIMIT 1"
+                )
+                row = cursor.fetchone()
+                return self._row_to_dict(row)
         except Exception as e:
             logger.error(f"查询最新信号失败: {e}")
             return None
@@ -1019,12 +1019,12 @@ class DatabaseManager:
             where_clause = ("WHERE " + " AND ".join(where)) if where else ""
             offset = (page - 1) * page_size
             params.extend([page_size, offset])
-            cursor = self._get_cursor()
-            cursor.execute(
-                f"SELECT * FROM signal_alerts {where_clause} ORDER BY trigger_time DESC LIMIT ? OFFSET ?",
-                params
-            )
-            return cursor.fetchall()
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    f"SELECT * FROM signal_alerts {where_clause} ORDER BY trigger_time DESC LIMIT ? OFFSET ?",
+                    params
+                )
+                return cursor.fetchall()
         except Exception as e:
             logger.error(f"查询告警列表失败: {e}")
             return []
@@ -1041,11 +1041,11 @@ class DatabaseManager:
                 where.append("acknowledged = ?")
                 params.append(1 if acknowledged else 0)
             where_clause = ("WHERE " + " AND ".join(where)) if where else ""
-            cursor = self._get_cursor()
-            cursor.execute(
-                f"SELECT COUNT(*) FROM signal_alerts {where_clause}", params
-            )
-            return cursor.fetchone()[0]
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM signal_alerts {where_clause}", params
+                )
+                return cursor.fetchone()[0]
         except Exception as e:
             logger.error(f"查询告警总数失败: {e}")
             return 0
@@ -1054,14 +1054,14 @@ class DatabaseManager:
         """分页获取信号历史"""
         try:
             offset = (page - 1) * page_size
-            cursor = self._get_cursor()
-            cursor.execute(
-                """SELECT * FROM signal_alerts
-                   WHERE trigger_time >= datetime('now', '-' || ? || ' days')
-                   ORDER BY trigger_time DESC LIMIT ? OFFSET ?""",
-                (days, page_size, offset)
-            )
-            return cursor.fetchall()
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    """SELECT * FROM signal_alerts
+                       WHERE trigger_time >= datetime('now', '-' || ? || ' days')
+                       ORDER BY trigger_time DESC LIMIT ? OFFSET ?""",
+                    (days, page_size, offset)
+                )
+                return cursor.fetchall()
         except Exception as e:
             logger.error(f"查询信号历史失败: {e}")
             return []
@@ -1069,12 +1069,12 @@ class DatabaseManager:
     def get_signal_count(self, days: int = 30):
         """获取信号总数"""
         try:
-            cursor = self._get_cursor()
-            cursor.execute(
-                "SELECT COUNT(*) FROM signal_alerts WHERE trigger_time >= datetime('now', '-' || ? || ' days')",
-                (days,)
-            )
-            return cursor.fetchone()[0]
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM signal_alerts WHERE trigger_time >= datetime('now', '-' || ? || ' days')",
+                    (days,)
+                )
+                return cursor.fetchone()[0]
         except Exception as e:
             logger.error(f"查询信号总数失败: {e}")
             return 0
@@ -1082,12 +1082,12 @@ class DatabaseManager:
     def get_gex_history_days(self, days: int = 90):
         """按天数获取GEX历史 (API用)"""
         try:
-            cursor = self._get_cursor()
-            cursor.execute(
-                "SELECT * FROM gex_history WHERE timestamp >= datetime('now', '-' || ? || ' days') ORDER BY timestamp ASC",
-                (days,)
-            )
-            return cursor.fetchall()
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM gex_history WHERE timestamp >= datetime('now', '-' || ? || ' days') ORDER BY timestamp ASC",
+                    (days,)
+                )
+                return cursor.fetchall()
         except Exception as e:
             logger.error(f"查询GEX历史失败: {e}")
             return []
@@ -1095,17 +1095,17 @@ class DatabaseManager:
     def get_vix_history(self, days: int = 90):
         """按天数获取VIX历史"""
         try:
-            cursor = self._get_cursor()
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='vix_analysis'"
-            )
-            if not cursor.fetchone():
-                return []
-            cursor.execute(
-                "SELECT * FROM vix_analysis WHERE timestamp >= datetime('now', '-' || ? || ' days') ORDER BY timestamp ASC",
-                (days,)
-            )
-            return cursor.fetchall()
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='vix_analysis'"
+                )
+                if not cursor.fetchone():
+                    return []
+                cursor.execute(
+                    "SELECT * FROM vix_analysis WHERE timestamp >= datetime('now', '-' || ? || ' days') ORDER BY timestamp ASC",
+                    (days,)
+                )
+                return cursor.fetchall()
         except Exception as e:
             logger.error(f"查询VIX历史失败: {e}")
             return []
@@ -1113,12 +1113,12 @@ class DatabaseManager:
     def get_darkpool_history_list(self, days: int = 90):
         """按天数获取暗盘历史 (返回列表, API用)"""
         try:
-            cursor = self._get_cursor()
-            cursor.execute(
-                "SELECT * FROM dark_pool_metrics WHERE date >= date('now', '-' || ? || ' days') ORDER BY date ASC",
-                (days,)
-            )
-            return cursor.fetchall()
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM dark_pool_metrics WHERE date >= date('now', '-' || ? || ' days') ORDER BY date ASC",
+                    (days,)
+                )
+                return cursor.fetchall()
         except Exception as e:
             logger.error(f"查询暗盘历史失败: {e}")
             return []

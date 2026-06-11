@@ -83,7 +83,7 @@ class HyperliquidStream:
         try:
             return not self._ws.closed
         except AttributeError:
-            return self._ws.state == 3  # OPEN
+            return self._ws.state == 1  # State.OPEN
 
     @property
     def is_running(self) -> bool:
@@ -173,7 +173,7 @@ class HyperliquidStream:
 
     async def _disconnect(self) -> None:
         """断开 WebSocket 连接"""
-        if self._ws and not self._ws.closed:
+        if self._ws and self.is_connected:
             try:
                 # 发送取消订阅 (可选，大多数 WS 服务器会自动清理)
                 unsub_msg = {
