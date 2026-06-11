@@ -298,9 +298,14 @@ class RESTPollScheduler:
         """轮询 AXLFI 暗盘净头寸数据
 
         盘中每15分钟获取一次, 发布到 EventBus Topics.DARKPOOL_AXLFI
+        同时运行暗盘预处理器 (EMA快慢线/零轴穿越/动量反转)
         """
         logger.info("AXLFI 暗盘轮询任务已启动")
         interval = POLL_INTERVAL_INTRADAY
+
+        # 延迟导入预处理器
+        from quant_logic.darkpool_preprocessor import DarkPoolPreprocessor
+        preprocessor = DarkPoolPreprocessor()
 
         while self._running:
             try:
@@ -344,6 +349,19 @@ class RESTPollScheduler:
                             short_pct_list[-1] if short_pct_list else 0
                         )
 
+                        # === 暗盘预处理: EMA快慢线/零轴穿越/动量反转 ===
+                        short_vol_series = symbol_data.get('short_volume', [])
+                        net_vol_series = symbol_data.get('net_volume', [])
+                        preprocess_result = None
+                        if short_vol_series and net_vol_series and len(short_vol_series) >= 20:
+                            preprocess_result = await loop.run_in_executor(
+                                self._executor,
+                                lambda: preprocessor.full_process(
+                                    short_vol_series[-120:] if len(short_vol_series) >= 120 else short_vol_series,
+                                    net_vol_series[-120:] if len(net_vol_series) >= 120 else net_vol_series,
+                                ),
+                            )
+
                         await self._bus.publish(Topics.DARKPOOL_AXLFI, {
                             'dollar_dp_position': dp_position,
                             'close': close_prices,
@@ -363,6 +381,10 @@ class RESTPollScheduler:
                                 'source': 'axlfi',
                                 'timestamp': datetime.now(),
                             })
+
+                        # 发布暗盘预处理结果 (EMA快慢线/零轴穿越/动量反转)
+                        if preprocess_result:
+                            await self._bus.publish(Topics.DARKPOOL_PREPROCESSED, preprocess_result)
 
                         logger.debug(
                             f"AXLFI 已发布: DP=${latest_dp:,.0f}, "
@@ -594,7 +616,7 @@ class RESTPollScheduler:
             })
 
     async def _poll_axlfi_once(self):
-        """单次 AXLFI 采集"""
+        """单次 AXLFI 采集 (含暗盘预处理)"""
         loop = asyncio.get_event_loop()
         symbol_data = await loop.run_in_executor(
             self._executor, lambda: self._axlfi.fetch_symbol_data('SPY', 120)
@@ -620,6 +642,22 @@ class RESTPollScheduler:
                     'short_volume_pct': symbol_data.get('short_volume_pct', []),
                     'timestamp': datetime.now(),
                 })
+
+                # 暗盘预处理: EMA快慢线/零轴穿越/动量反转
+                short_vol = symbol_data.get('short_volume', [])
+                net_vol = symbol_data.get('net_volume', [])
+                if short_vol and net_vol and len(short_vol) >= 20:
+                    from quant_logic.darkpool_preprocessor import DarkPoolPreprocessor
+                    pp = DarkPoolPreprocessor()
+                    preprocess_result = await loop.run_in_executor(
+                        self._executor,
+                        lambda: pp.full_process(
+                            short_vol[-120:] if len(short_vol) >= 120 else short_vol,
+                            net_vol[-120:] if len(net_vol) >= 120 else net_vol,
+                        ),
+                    )
+                    if preprocess_result:
+                        await self._bus.publish(Topics.DARKPOOL_PREPROCESSED, preprocess_result)
 
     async def _poll_dbmf_once(self):
         """单次 DBMF 采集"""

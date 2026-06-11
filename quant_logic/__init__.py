@@ -23,6 +23,7 @@ from quant_logic.gex_calculator import GEXCalculator, calculate_single_option_ge
 from quant_logic.vix_analyzer import VIXAnalyzer, quick_vix_analysis
 from quant_logic.crypto_leverage_cleaner import CryptoLeverageCleaner, quick_leverage_check
 from quant_logic.darkpool_verifier import DarkPoolVerifier, quick_darkpool_check
+from quant_logic.darkpool_preprocessor import DarkPoolPreprocessor, quick_preprocess
 
 __all__ = [
     'GEXCalculator',
@@ -33,4 +34,6 @@ __all__ = [
     'quick_leverage_check',
     'DarkPoolVerifier',
     'quick_darkpool_check',
+    'DarkPoolPreprocessor',
+    'quick_preprocess',
 ]

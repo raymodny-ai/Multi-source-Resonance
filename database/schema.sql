@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS dark_pool_metrics (
     short_ratio_signal BOOLEAN DEFAULT FALSE,    -- 卖空比>45%信号
     stockgrid_signal BOOLEAN DEFAULT FALSE,      -- Stockgrid拐点信号
     aggregated_signal BOOLEAN DEFAULT FALSE,     -- 三选二聚合信号
+    -- 暗盘预处理字段 (v2.1: EMA降噪 + 拐点检测)
+    v_net REAL,                        -- 净做空量 V_net = 2*V_short - V_total
+    ema_fast_5 REAL,                   -- EMA快线 (span=5) 近一周短期做市商情绪
+    ema_slow_20 REAL,                  -- EMA慢线 (span=20) 近一月基准流动性状态
+    zero_cross_signal TEXT,            -- 零轴穿越信号: 'BULLISH'/'BEARISH'/NULL
+    momentum_reversal_signal TEXT,     -- 动量反转信号: 'EARLY_SELL_WARNING'/NULL
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

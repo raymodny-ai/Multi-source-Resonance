@@ -118,6 +118,9 @@ class DatabaseManager:
             # 创建表结构
             self._create_tables()
             
+            # v2.1 迁移: 为现有数据库添加暗盘预处理列
+            self._migrate_v21_darkpool()
+            
             logger.info(f"数据库初始化成功 (WAL模式): {self.db_path}")
             
         except sqlite3.Error as e:
@@ -156,6 +159,29 @@ class DatabaseManager:
                 details={"error": str(e)}
             )
     
+    def _migrate_v21_darkpool(self):
+        """v2.1 迁移: 为现有数据库添加暗盘预处理列
+        
+        使用 ALTER TABLE ADD COLUMN 添加新列,
+        如果列已存在则忽略错误 (SQLite 不支持 IF NOT EXISTS for ADD COLUMN)
+        """
+        new_columns = [
+            ('v_net', 'REAL'),
+            ('ema_fast_5', 'REAL'),
+            ('ema_slow_20', 'REAL'),
+            ('zero_cross_signal', 'TEXT'),
+            ('momentum_reversal_signal', 'TEXT'),
+        ]
+        for col_name, col_type in new_columns:
+            try:
+                self.connection.execute(
+                    f"ALTER TABLE dark_pool_metrics ADD COLUMN {col_name} {col_type}"
+                )
+                logger.info(f"v2.1 迁移: 添加列 dark_pool_metrics.{col_name}")
+            except sqlite3.OperationalError:
+                pass  # 列已存在, 跳过
+        self.connection.commit()
+
     @contextmanager
     def _get_cursor(self):
         """获取游标的上下文管理器，自动处理事务提交/回滚
@@ -322,7 +348,12 @@ class DatabaseManager:
         dix_signal: bool = False,
         short_ratio_signal: bool = False,
         stockgrid_signal: bool = False,
-        aggregated_signal: bool = False
+        aggregated_signal: bool = False,
+        v_net: Optional[float] = None,
+        ema_fast_5: Optional[float] = None,
+        ema_slow_20: Optional[float] = None,
+        zero_cross_signal: Optional[str] = None,
+        momentum_reversal_signal: Optional[str] = None,
     ) -> bool:
         """插入暗盘指标记录
         
@@ -338,6 +369,11 @@ class DatabaseManager:
             short_ratio_signal: 卖空比>45%信号，默认False
             stockgrid_signal: Stockgrid拐点信号，默认False
             aggregated_signal: 三选二聚合信号，默认False
+            v_net: 净做空量 (v2.1 暗盘预处理)
+            ema_fast_5: EMA快线span=5 (v2.1)
+            ema_slow_20: EMA慢线span=20 (v2.1)
+            zero_cross_signal: 零轴穿越信号 (v2.1)
+            momentum_reversal_signal: 动量反转信号 (v2.1)
             
         Returns:
             bool: 插入成功返回True，失败返回False
@@ -359,8 +395,11 @@ class DatabaseManager:
                      stockgrid_20d_slope, stockgrid_60d_slope,
                      stockgrid_divergence, dbmf_ma5_recovery,
                      dix_signal, short_ratio_signal, stockgrid_signal,
-                     aggregated_signal, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                     aggregated_signal,
+                     v_net, ema_fast_5, ema_slow_20,
+                     zero_cross_signal, momentum_reversal_signal,
+                     updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 """, (
                     date.isoformat(),
                     dix_value,
@@ -372,7 +411,12 @@ class DatabaseManager:
                     int(dix_signal),
                     int(short_ratio_signal),
                     int(stockgrid_signal),
-                    int(aggregated_signal)
+                    int(aggregated_signal),
+                    v_net,
+                    ema_fast_5,
+                    ema_slow_20,
+                    zero_cross_signal,
+                    momentum_reversal_signal,
                 ))
             
             logger.debug(f"暗盘指标插入成功: {date}")

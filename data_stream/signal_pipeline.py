@@ -77,6 +77,7 @@ class SignalPipeline:
         self._gex_cache: Dict[str, Any] = {}
         self._vix_cache: Dict[str, Any] = {}
         self._darkpool_cache: Dict[str, Any] = {}
+        self._darkpool_preprocessed: Dict[str, Any] = {}  # v2.1 暗盘预处理结果
 
         # 维度就绪状态 (收到新数据后)
         self._crypto_ready = False
@@ -103,6 +104,7 @@ class SignalPipeline:
         await self._bus.subscribe(Topics.SHORT_VOLUME_SPY, self._on_short_volume)
         await self._bus.subscribe(Topics.DBMF_RECOVERY, self._on_dbmf_recovery)
         await self._bus.subscribe(Topics.DATA_SOURCE_ERROR, self._on_source_error)
+        await self._bus.subscribe(Topics.DARKPOOL_PREPROCESSED, self._on_darkpool_preprocessed)  # v2.1
 
         logger.info(
             "SignalPipeline 已订阅 {} 个topic",
@@ -318,6 +320,16 @@ class SignalPipeline:
         """RESTPollScheduler 推送 DBMF 收复信号"""
         self._darkpool_cache['dbmf_recovery'] = bool(data)
         await self._try_mark_darkpool_ready()
+
+    async def _on_darkpool_preprocessed(self, data: Dict[str, Any]) -> None:
+        """接收暗盘预处理结果 (EMA快慢线/零轴穿越/动量反转)"""
+        self._darkpool_preprocessed = data
+        logger.debug(
+            f"暗盘预处理结果: V_net={data.get('latest_v_net', 0):,.0f}, "
+            f"EMA_trend={data.get('ema_trend')}, "
+            f"ZeroCross={data.get('zero_cross', {}).get('signal')}, "
+            f"Momentum={data.get('momentum_reversal', {}).get('signal')}"
+        )
 
     async def _try_mark_darkpool_ready(self) -> None:
         """检查 darkpool 维度是否至少两个子源就绪"""
@@ -565,6 +577,10 @@ class SignalPipeline:
                         if latest_darkpool else False
                     ),
                     available_sources=available_sources,
+                    
+                    preprocessed_bonus=self._resonance_scorer.compute_preprocessed_bonus(
+                        self._darkpool_preprocessed
+                    ),
                 ),
             )
 

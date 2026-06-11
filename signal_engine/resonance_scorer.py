@@ -337,9 +337,11 @@ class ResonanceScorer:
         short_ratio_flag: bool,
         stockgrid_flag: bool,
         dbmf_recovery: bool,
-        available_sources: Optional[Dict[str, bool]] = None
+        available_sources: Optional[Dict[str, bool]] = None,
+        
+        preprocessed_bonus: float = 0.0,
     ) -> Dict[str, any]:
-        """支持动态降级逻辑的暗盘评分系统
+        """支持动态降级逻辑的暗盘评分系统 (v2.1 含 EMA 预处理加成)
         
         PRD 第 6 节要求：当某数据源失败时，自动放弃该校验，将判定权交给其他两源，
         权重不作调减。本方法实现这一动态权重重分配逻辑。
@@ -399,6 +401,12 @@ class ResonanceScorer:
             if total_available < 3:
                 details += " [处于容错降级模式]"
 
+            # v2.1: EMA 预处理加成 (零轴穿越/动量反转)
+            bonus = min(preprocessed_bonus, 0.5)  # 加成上限 0.5
+            if bonus > 0:
+                score += bonus
+                details += f" +EMA预处理加成+{bonus:.2f}"
+
             logger.info(f"暗盘评分(降级模式): {score:.2f}分 - {details}")
 
             return {
@@ -415,6 +423,39 @@ class ResonanceScorer:
                 'details': '计算异常'
             }
     
+    @staticmethod
+    def compute_preprocessed_bonus(preprocessed: Optional[Dict[str, any]]) -> float:
+        """从暗盘预处理结果计算 EMA 加成值 (v2.1)
+        
+        信号规则:
+        - 零轴向上穿越 (BULLISH): +0.25 (买入需求回归)
+        - 动量反转预警 (EARLY_SELL_WARNING): +0.15 (早期预警注意)
+        
+        Args:
+            preprocessed: darkpool_preprocessor.full_process() 的输出
+        
+        Returns:
+            float: 加成值 (0.0 ~ 0.40)
+        """
+        if not preprocessed:
+            return 0.0
+        
+        bonus = 0.0
+        
+        # 零轴穿越: 空头转多头 (买入需求回归)
+        zero_cross = preprocessed.get('zero_cross', {})
+        if zero_cross.get('signal') == 'BULLISH':
+            bonus += 0.25
+            logger.info(f"DarkPool EMA 加成: 零轴向上穿越 +0.25")
+        
+        # 动量反转预警: 早期抛售衰减 (卖出压力减轻)
+        momentum = preprocessed.get('momentum_reversal', {})
+        if momentum.get('signal') == 'EARLY_SELL_WARNING':
+            bonus += 0.15
+            logger.info(f"DarkPool EMA 加成: 动量反转预警 +0.15")
+        
+        return min(bonus, 0.5)
+
     def calculate_total_score(
         self,
         gex_result: Dict[str, any],

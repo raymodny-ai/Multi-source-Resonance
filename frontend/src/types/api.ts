@@ -69,6 +69,13 @@ export interface DarkpoolData {
     short_ratio: boolean
     stockgrid: boolean
   }
+  
+  
+  v_net: number
+  ema_fast_5: number
+  ema_slow_20: number
+  zero_cross_signal: string | null
+  momentum_reversal_signal: string | null
 }
 
 // --- 仪表盘总响应 ---
@@ -118,6 +125,12 @@ export interface DarkpoolHistoryPoint {
   stockgrid_60d_slope: number
   divergence_flag: boolean
   golden_cross_flag: boolean
+  
+  v_net: number
+  ema_fast_5: number
+  ema_slow_20: number
+  zero_cross_signal: string | null
+  momentum_reversal_signal: string | null
 }
 
 // --- 信号 ---

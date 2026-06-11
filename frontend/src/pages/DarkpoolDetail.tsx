@@ -18,10 +18,23 @@ type RangeOption = 30 | 60 | 90 | 120
 function generateMockData(days: number): DarkpoolHistoryPoint[] {
   const data: DarkpoolHistoryPoint[] = []
   const now = new Date()
+  
+  let vNetBase = 500000  // 基准净做空量（股）
   for (let i = days; i >= 0; i--) {
     const d = new Date(now)
     d.setDate(d.getDate() - i)
     const base = 40 + Math.sin(i * 0.15) * 8
+    
+    
+    vNetBase += (Math.random() - 0.48) * 200000  // 略微偏向减少做空
+    const vNet = vNetBase + Math.random() * 100000
+    const emaFast = vNet + Math.random() * 50000
+    const emaSlow = vNet + Math.random() * 80000 + 100000
+    
+    
+    const zeroCross: string | null = (i === Math.floor(days * 0.3) && vNet > 0) ? 'BULLISH' : null
+    const momentum: string | null = (i <= 3 && vNet > 0) ? 'EARLY_SELL_WARNING' : null
+    
     data.push({
       date: d.toISOString().split('T')[0],
       dix_value: base + Math.random() * 4,
@@ -30,6 +43,11 @@ function generateMockData(days: number): DarkpoolHistoryPoint[] {
       stockgrid_60d_slope: Math.sin(i * 0.08) * 0.0025,
       divergence_flag: i % 15 === 0,
       golden_cross_flag: i % 20 === 0,
+      v_net: vNet,
+      ema_fast_5: emaFast,
+      ema_slow_20: emaSlow,
+      zero_cross_signal: zeroCross,
+      momentum_reversal_signal: momentum,
     })
   }
   return data
@@ -125,6 +143,42 @@ export default function DarkpoolDetail() {
       dataZoom: [{ type: 'inside', start: Math.max(0, 100 - (120 / range) * 100), end: 100 }],
     }
   }, [chartData, dateLabels, range])
+
+  // --- V_net + EMA 预处理图表 ---
+  const vNetOption = useMemo(() => ({
+    backgroundColor: 'transparent',
+    grid: { top: 20, right: 30, bottom: 50, left: 70 },
+    legend: { data: ['V_net', 'EMA-5 快线', 'EMA-20 慢线'], textStyle: { color: '#94a3b8', fontSize: 10 }, bottom: 5 },
+    xAxis: { type: 'category' as const, data: dateLabels, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8', fontSize: 9, rotate: 45, interval: Math.floor(dateLabels.length / 8) } },
+    yAxis: {
+      type: 'value' as const,
+      axisLabel: { color: '#94a3b8', fontSize: 10, formatter: (v: number) => v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(0) + 'K' : v.toFixed(0) },
+      splitLine: { lineStyle: { color: '#1e293b' } },
+    },
+    series: [
+      {
+        name: 'V_net', type: 'bar' as const, data: chartData.map((d) => d.v_net ?? 0),
+        itemStyle: { color: 'rgba(148,163,184,0.3)' }, barWidth: '60%',
+      },
+      {
+        name: 'EMA-5 快线', type: 'line' as const, data: chartData.map((d) => d.ema_fast_5 ?? 0), smooth: true,
+        lineStyle: { color: '#f59e0b', width: 2 }, itemStyle: { color: '#f59e0b' }, symbol: 'none',
+      },
+      {
+        name: 'EMA-20 慢线', type: 'line' as const, data: chartData.map((d) => d.ema_slow_20 ?? 0), smooth: true,
+        lineStyle: { color: '#22c55e', width: 1.5, type: 'dashed' as const }, itemStyle: { color: '#22c55e' }, symbol: 'none',
+      },
+    ],
+    tooltip: {
+      trigger: 'axis' as const, backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 11 },
+      formatter: (params: unknown) => {
+        const p = (params as Array<{ seriesName: string; value: number }>)
+        const fmt = (v: number) => v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : v.toFixed(0)
+        return p.map((s) => `<b>${s.seriesName}</b>: ${fmt(s.value)}`).join('<br/>')
+      },
+    },
+    dataZoom: [{ type: 'inside', start: Math.max(0, 100 - (120 / range) * 100), end: 100 }],
+  } as EChartsOption), [chartData, dateLabels, range])
 
   if (isLoading && !historyData) {
     return (
@@ -222,6 +276,27 @@ export default function DarkpoolDetail() {
         </div>
       </div>
 
+      {/* V_net + EMA 预处理 (v2.1) */}
+      <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
+        <h3 className="text-sm font-semibold mb-3">净做空量 V_net = 2×V_short − V_total + EMA 快慢双线</h3>
+        <ReactEChartsCore option={vNetOption as EChartsOption} style={{ height: 320 }} notMerge />
+        <div className="flex flex-wrap items-center gap-4 mt-2 text-[10px] text-[var(--text-secondary)]">
+          <span className="flex items-center gap-1"><span className="w-3 h-3 bg-[rgba(148,163,184,0.3)] inline-block rounded-sm" /> V_net 净做空</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-0.5 bg-[#f59e0b] inline-block" /> EMA-5 快线 (近一周)</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-0.5 bg-[#22c55e] inline-block" style={{ borderTop: '1px dashed #22c55e' }} /> EMA-20 慢线 (近一月)</span>
+          {latest?.zero_cross_signal && (
+            <span className={`flex items-center gap-1 font-semibold ${latest.zero_cross_signal === 'BULLISH' ? 'text-[var(--accent-green)]' : 'text-[var(--accent-red)]'}`}>
+              ⦿ 零轴穿越: {latest.zero_cross_signal === 'BULLISH' ? '🟢 买入需求回归' : '🔴 抛售压力增加'}
+            </span>
+          )}
+          {latest?.momentum_reversal_signal && (
+            <span className="flex items-center gap-1 text-[#f59e0b] font-semibold">
+              ⚡ {latest.momentum_reversal_signal === 'EARLY_SELL_WARNING' ? '早期抛售预警' : latest.momentum_reversal_signal}
+            </span>
+          )}
+        </div>
+      </div>
+
       {/* Summary Card */}
       {latest && (
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
@@ -235,6 +310,24 @@ export default function DarkpoolDetail() {
               { label: 'DBMF 收复', value: 'YES', status: true, hint: 'DBMF MA5 收复' },
               { label: '底背离', value: latest.divergence_flag ? 'YES' : 'NO', status: latest.divergence_flag, hint: '价格与净头寸背离' },
               { label: 'Golden Cross', value: latest.golden_cross_flag ? 'YES' : 'NO', status: latest.golden_cross_flag, hint: '20d/60d 黄金交叉' },
+            ].map((item) => (
+              <div key={item.label} className="text-center group relative">
+                <p className="text-[10px] text-[var(--text-secondary)] mb-1">{item.label}</p>
+                <p className={`text-xs font-semibold ${item.status ? 'text-[var(--accent-green)]' : 'text-[var(--accent-red)]'}`}>
+                  {item.value}
+                </p>
+                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-0.5 bg-[var(--bg-primary)] border border-[var(--border)] rounded text-[9px] text-[var(--text-secondary)] opacity-0 group-hover:opacity-100 whitespace-nowrap pointer-events-none transition-opacity z-10">
+                  {item.hint}
+                </div>
+              </div>
+            ))}
+          </div>
+          {/* v2.1 暗盘预处理指标 */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-3 pt-3 border-t border-[var(--border)]">
+            {[
+              { label: 'V_net (净做空)', value: latest.v_net ? (latest.v_net >= 1e6 ? (latest.v_net / 1e6).toFixed(2) + 'M' : (latest.v_net / 1e3).toFixed(0) + 'K') : 'N/A', status: latest.v_net != null && latest.v_net < 0, hint: 'V_net = 2×V_short − V_total' },
+              { label: 'EMA-5 快线', value: latest.ema_fast_5 ? (latest.ema_fast_5 >= 1e6 ? (latest.ema_fast_5 / 1e6).toFixed(2) + 'M' : (latest.ema_fast_5 / 1e3).toFixed(0) + 'K') : 'N/A', status: (latest.ema_fast_5 ?? 0) < (latest.ema_slow_20 ?? 0), hint: '近一周做市商情绪' },
+              { label: 'EMA-20 慢线', value: latest.ema_slow_20 ? (latest.ema_slow_20 >= 1e6 ? (latest.ema_slow_20 / 1e6).toFixed(2) + 'M' : (latest.ema_slow_20 / 1e3).toFixed(0) + 'K') : 'N/A', status: true, hint: '近一月基准流动性' },
             ].map((item) => (
               <div key={item.label} className="text-center group relative">
                 <p className="text-[10px] text-[var(--text-secondary)] mb-1">{item.label}</p>

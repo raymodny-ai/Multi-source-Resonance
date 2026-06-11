@@ -59,6 +59,7 @@ class Topics:
 
     # Dark Pool 维度 (AXLFI)
     DARKPOOL_AXLFI = "darkpool.axlfi"
+    DARKPOOL_PREPROCESSED = "darkpool.preprocessed"  # EMA快慢线/零轴穿越/动量反转
 
     # 系统级事件
     DATA_SOURCE_ERROR = "data.source_error"
