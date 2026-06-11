@@ -117,7 +117,10 @@ export default function SystemStatus() {
 
   return (
     <div className="space-y-4 max-w-[1600px]">
-      <h1 className="text-xl font-bold">系统状态监控</h1>
+      <div className="flex items-center gap-3">
+        <h1 className="text-xl font-bold">系统状态监控</h1>
+        <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--accent-blue)]/20 text-[var(--accent-blue)] font-mono">build 20260611-0843</span>
+      </div>
 
       {/* Auto-polling disabled warning banner */}
       {!autoPollingEnabled && (
