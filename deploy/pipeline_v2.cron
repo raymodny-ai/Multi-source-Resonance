@@ -1,0 +1,24 @@
+# Multi-source Resonance V2.0 — Linux crontab 配置
+# 美东时间每日 16:15 触发盘后批处理流水线
+#
+# 安装方式:
+#   crontab deploy/pipeline_v2.cron
+#
+# 或手动编辑:
+#   crontab -e
+#   添加以下行 (修改实际路径):
+
+# 美东时间 16:15 = UTC 21:15 (夏令时) / UTC 20:15 (冬令时)
+# 建议使用 UTC 时间以避免夏令时切换问题
+#
+# 夏令时 (3月-11月): EDT = UTC-4, 16:15 EDT = 20:15 UTC
+# 冬令时 (11月-3月): EST = UTC-5, 16:15 EST = 21:15 UTC
+
+# 每日 UTC 20:15 执行 (美东夏令时 16:15)
+15 20 * * * cd /opt/multi-source-resonance && python3 run_pipeline_v2.py >> logs/pipeline_cron.log 2>&1
+
+# 如果有独立的 Python 虚拟环境:
+# 15 20 * * * cd /opt/multi-source-resonance && .venv/bin/python run_pipeline_v2.py >> logs/pipeline_cron.log 2>&1
+
+# 每周六 08:00 执行数据清理
+# 0 8 * * 6 cd /opt/multi-source-resonance && python3 -c "from database.db_manager import DatabaseManager; db=DatabaseManager(); db.vacuum_database()" >> logs/maintenance.log 2>&1

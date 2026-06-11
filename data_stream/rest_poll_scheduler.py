@@ -66,6 +66,8 @@ class RESTPollScheduler:
         self._axlfi = None
         self._dbmf = None
         self._finra = None
+        self._hyperliquid = None  # 加密衍生品 REST
+        self._ccdata = None       # 加密衍生品降级
 
         logger.info("RESTPollScheduler 初始化完成")
 
@@ -133,13 +135,16 @@ class RESTPollScheduler:
         try:
             from data_fetchers import SqueezeMetricsFetcher, YahooFinanceFetcher
             from data_fetchers import FINRAFetcher, DBMFFetcher
+            from data_fetchers import HyperliquidFetcher, CCDataFetcher
             from data_fetchers.axlfi_fetcher import AxlfiFetcher
 
             self._yahoo = YahooFinanceFetcher()  # VIX + 做空数据 (yfinance)
             self._axlfi = AxlfiFetcher()
             self._dbmf = DBMFFetcher()
             self._finra = FINRAFetcher()
-            logger.debug("数据获取器延迟加载完成")
+            self._hyperliquid = HyperliquidFetcher()  # 加密衍生品 (REST 降级)
+            self._ccdata = CCDataFetcher()            # 加密衍生品 (二级降级)
+            logger.debug("数据获取器延迟加载完成 (6 数据源)")
         except Exception as e:
             logger.error(f"数据获取器加载失败: {e}", exc_info=True)
 
@@ -528,59 +533,75 @@ class RESTPollScheduler:
             logger.error(f"盘后做空数据任务失败: {e}", exc_info=True)
 
     # ================================================================
-    # 手动采集: 一次性执行所有轮询 (忽略暂停/市场时间限制)
+    # 手动采集: 一次性执行所有 6 数据源 (忽略暂停/市场时间限制)
     # ================================================================
 
     async def run_once_manual_collect(self) -> Dict[str, Any]:
-        """手动触发一次完整的盘中数据采集循环
+        """手动触发一次完整的 6 数据源采集循环
 
         忽略自动轮询暂停状态和市场时间限制，
-        并发执行所有数据源采集。
+        并发执行所有数据源采集，并通过 EventBus 发布。
 
         Returns:
             dict: 每个数据源的采集结果 {"name": str, "status": str, "elapsed_sec": float, ...}
         """
         import time as _time
         start_ts = _time.time()
-        results = []
-        success_count = 0
+        results: List[Dict[str, Any]] = []
 
-        logger.info("[MANUAL] RESTPollScheduler 手动采集开始...")
+        # ── OpenCLAW 风格分界线 ──
+        logger.info("=" * 54)
+        logger.info("  MANUAL COLLECT STARTED  %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        logger.info("=" * 54)
+        logger.info("── 开始手动采集 (6 数据源) ──")
+
         self._load_fetchers()
 
         # 强制刷新 VIX 缓存 (确保手动采集获取最新 CBOE 数据)
         try:
             from data_fetchers.yahoo_finance_fetcher import YahooFinanceFetcher
             YahooFinanceFetcher.invalidate_vix_cache()
+            logger.info("[VIX     ] VIX 缓存已刷新，将获取最新 CBOE 数据")
         except Exception:
             pass
 
-        async def _collect_one(name: str, coro):
+        async def _collect_one(name: str, source_tag: str, coro):
             t0 = _time.time()
             try:
                 await coro
                 elapsed = round(_time.time() - t0, 2)
-                return {"name": name, "status": "success", "elapsed_sec": elapsed}
+                logger.info("[%-8s] ✓ 采集成功  耗时 %.2fs", source_tag, elapsed)
+                return {"name": name, "source_tag": source_tag, "status": "success", "elapsed_sec": elapsed}
             except Exception as e:
                 elapsed = round(_time.time() - t0, 2)
-                logger.error(f"[MANUAL] {name} 采集失败: {e}")
-                return {"name": name, "status": "error", "elapsed_sec": elapsed, "error": str(e)}
+                logger.error("[%-8s] ✗ 采集失败  耗时 %.2fs  (%s)", source_tag, elapsed, str(e)[:80])
+                return {"name": name, "source_tag": source_tag, "status": "error", "elapsed_sec": elapsed, "error": str(e)}
 
-        # 并发执行所有采集任务
+        # 并发执行全部 6 个采集任务
         tasks = [
-            _collect_one("GEX/DIX", self._poll_gex_dix_once()),
-            _collect_one("VIX期限结构", self._poll_vix_once()),
-            _collect_one("AXLFI暗盘", self._poll_axlfi_once()),
-            _collect_one("DBMF均线", self._poll_dbmf_once()),
+            _collect_one("GEX/DIX",       "GEX/DIX", self._poll_gex_dix_once()),
+            _collect_one("VIX期限结构",    "VIX",     self._poll_vix_once()),
+            _collect_one("AXLFI暗盘",      "AXLFI",   self._poll_axlfi_once()),
+            _collect_one("DBMF均线",       "DBMF",    self._poll_dbmf_once()),
+            _collect_one("加密衍生品",     "CRYPTO",  self._poll_crypto_once()),
+            _collect_one("做空数据",       "SHORT",   self._poll_short_once()),
         ]
         results = list(await asyncio.gather(*tasks))
-        success_count = sum(1 for r in results if r.get("status") == "success")
 
         total_sources = len(results)
+        success_count = sum(1 for r in results if r.get("status") == "success")
         total_elapsed = round(_time.time() - start_ts, 2)
 
-        summary = f"[MANUAL] RESTPollScheduler 手动采集完成: {success_count}/{total_sources} 成功, 耗时 {total_elapsed}s"
-        logger.info(summary)
+        # ── 汇总分界线 ──
+        if success_count == total_sources:
+            logger.info("── 采集完成 %d/%d 全部成功, 总耗时 %.2fs ──", success_count, total_sources, total_elapsed)
+        elif success_count > 0:
+            logger.warning("── 采集完成 %d/%d 部分成功, 总耗时 %.2fs ──", success_count, total_sources, total_elapsed)
+        else:
+            logger.error("── 采集完成 %d/%d 全部失败, 总耗时 %.2fs ──", success_count, total_sources, total_elapsed)
+        logger.info("=" * 54)
+
+        summary = f"[MANUAL] 手动采集完成: {success_count}/{total_sources} 成功, 耗时 {total_elapsed}s"
 
         return {
             "summary": summary,
@@ -671,3 +692,106 @@ class RESTPollScheduler:
                 self._executor, self._dbmf.check_ma5_recovery, current_price, historical_prices
             )
             await self._bus.publish(Topics.DBMF_RECOVERY, {'recovery': recovery, 'price': current_price})
+
+    async def _poll_crypto_once(self):
+        """单次加密衍生品采集 (Hyperliquid REST → CCData 降级)
+
+        获取 BTC funding rate 和 open interest，
+        优先 Hyperliquid REST API，失败则降级 CCData。
+        """
+        loop = asyncio.get_event_loop()
+        funding_rate = None
+        oi_data = None
+        data_source = None
+
+        # 第1步: Hyperliquid REST API
+        try:
+            funding_rate = await loop.run_in_executor(
+                self._executor, self._hyperliquid.get_funding_rate, 'BTC/USDT'
+            )
+            oi_data = await loop.run_in_executor(
+                self._executor, self._hyperliquid.get_open_interest, 'BTC/USDT'
+            )
+            if funding_rate is not None or oi_data is not None:
+                data_source = 'Hyperliquid'
+        except Exception as e:
+            logger.debug(f"Hyperliquid REST 加密数据失败: {e}")
+
+        # 第2步: CCData 降级
+        if data_source is None:
+            try:
+                funding_rate = await loop.run_in_executor(
+                    self._executor, self._ccdata.get_funding_rate, 'BTC/USDT'
+                )
+                oi_data = await loop.run_in_executor(
+                    self._executor, self._ccdata.get_open_interest, 'BTC/USDT'
+                )
+                if funding_rate is not None or oi_data is not None:
+                    data_source = 'CCData'
+            except Exception as e:
+                logger.debug(f"CCData 加密数据失败: {e}")
+
+        if data_source and (funding_rate is not None or oi_data is not None):
+            oi_value = oi_data.get('oi') if isinstance(oi_data, dict) else oi_data
+            await self._bus.publish(Topics.CRYPTO_FUNDING_RATE, {
+                'rate': funding_rate or 0.0,
+                'coin': 'BTC',
+                'timestamp': datetime.now(),
+            })
+            if oi_value is not None:
+                await self._bus.publish(Topics.CRYPTO_OPEN_INTEREST, {
+                    'oi': oi_value,
+                    'coin': 'BTC',
+                    'source': data_source,
+                    'timestamp': datetime.now(),
+                })
+        else:
+            raise RuntimeError("Hyperliquid 和 CCData 均获取加密数据失败")
+
+    async def _poll_short_once(self):
+        """单次做空数据采集 (yfinance → FINRA 降级)
+
+        获取 SPY 做空比例，优先 yfinance short interest，
+        失败则降级 FINRA 管道文件。
+        """
+        loop = asyncio.get_event_loop()
+        short_ratio = None
+        data_source = None
+
+        # 第1步: yfinance 做空数据
+        try:
+            short_data = await loop.run_in_executor(
+                self._executor,
+                lambda: self._yahoo.get_short_interest('SPY'),
+            )
+            if short_data and short_data.get('short_pct_float') is not None:
+                short_ratio = short_data['short_pct_float']
+                data_source = 'yfinance'
+        except Exception as e:
+            logger.debug(f"yfinance 做空数据失败: {e}")
+
+        # 第2步: FINRA 降级
+        if data_source is None:
+            try:
+                spy_data = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self._finra.fetch_short_volume_data('SPY'),
+                )
+                if spy_data:
+                    short_ratio = await loop.run_in_executor(
+                        self._executor,
+                        self._finra.calculate_off_exchange_short_ratio,
+                        spy_data,
+                    )
+                    data_source = 'FINRA'
+            except Exception as e:
+                logger.debug(f"FINRA 做空数据失败: {e}")
+
+        if short_ratio is not None:
+            await self._bus.publish(Topics.SHORT_VOLUME_SPY, {
+                'ratio': short_ratio,
+                'source': data_source,
+                'timestamp': datetime.now(),
+            })
+        else:
+            raise RuntimeError("yfinance 和 FINRA 均获取做空数据失败")

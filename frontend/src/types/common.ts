@@ -41,6 +41,12 @@ export const STATE_COLORS: Record<string, string> = {
   NEGATIVE: '#ef4444',
   BACKWARDATION: '#ef4444',
   LEVERAGE_BUILDUP: '#ef4444',
+  Strong: '#22c55e',
+  Moderate: '#eab308',
+  Weak: '#64748b',
+  None: '#64748b',
+  BULLISH: '#22c55e',
+  BEARISH: '#ef4444',
 }
 
 export const HAWKES_STATE_COLORS: Record<string, string> = {

@@ -87,8 +87,44 @@ export interface DashboardScores {
     vix: VIXData
     crypto: CryptoData
     darkpool: DarkpoolData
+    cross_asset: CrossAssetData
   }
   hawkes: HawkesResult
+}
+
+// --- 跨资产共振 ---
+export interface CrossAssetData {
+  score: number
+  state: string
+  details: string
+  coherence_score: number
+  alignment_direction: string
+  resonance_strength: string
+  alignment_count: number
+}
+
+// --- 跨资产热力图 ---
+export interface CrossAssetHeatmap {
+  assets: string[]
+  signals: number[]
+  matrix: number[][]
+  overall_coherence: number
+}
+
+// --- 共振历史趋势 ---
+export interface ResonanceHistoryPoint {
+  timestamp: string
+  total_score: number
+  alert_level: string
+}
+
+// --- GEX 曲线 ---
+export interface GEXCurve {
+  timestamps: string[]
+  gex_calibrated: number[]
+  put_wall_level: number[]
+  flip_zone_lower: number[]
+  flip_zone_upper: number[]
 }
 
 // --- 历史序列数据 ---
@@ -161,15 +197,6 @@ export interface AlertRecord {
 
 
 // --- 系统状态 ---
-export interface SourceStatus {
-  name: string
-  status: 'ONLINE' | 'DEGRADED' | 'OFFLINE'
-  method: string
-  availability_pct: number
-  failure_count: number
-  last_updated: string
-}
-
 export interface CircuitBreakerStates {
   [source: string]: 'CLOSED' | 'OPEN' | 'HALF_OPEN'
 }
@@ -177,6 +204,17 @@ export interface CircuitBreakerStates {
 export interface DegradationDetails {
   failed_sources: string[]
   circuit_breaker_states: CircuitBreakerStates
+}
+
+export interface SourceStatus {
+  name: string
+  status: 'ONLINE' | 'DEGRADED' | 'OFFLINE'
+  method: string
+  availability_pct: number
+  failure_count: number
+  last_updated: string | null
+  last_elapsed_sec?: number | null
+  last_error?: string | null
 }
 
 export interface SystemStatusData {
@@ -187,7 +225,9 @@ export interface SystemStatusData {
   db_size_mb: number
   last_backup_time: string
   auto_polling_enabled: boolean
+  mode: string
   last_manual_collect: string | null
+  last_collect_summary: string | null
 }
 
 // --- 分页 ---
@@ -290,4 +330,5 @@ export interface ManualCollectResult {
 // --- 自动轮询 ---
 export interface AutoPollingStatus {
   enabled: boolean
+  mode?: string
 }

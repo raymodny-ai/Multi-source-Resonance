@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useDashboardScores, useRecentAlerts } from '../api/dashboard'
+import { useDashboardScores, useRecentAlerts, useGEXCurve, useCrossAssetHeatmap, useResonanceHistory } from '../api/dashboard'
 import { useStalenessStore } from '../stores/stalenessStore'
 import { useAutoPollingStatus } from '../api/system'
 import { formatCurrency, formatPercent, formatDecimal, formatOI } from '../utils/format'
@@ -9,6 +9,10 @@ import { ALERT_LEVEL_COLORS, ALERT_LEVEL_LABELS, HAWKES_STATE_COLORS, HAWKES_STA
 import type { AlertLevel } from '../types/common'
 import type { DashboardScores } from '../types/api'
 import { Pause, Play, RefreshCw, AlertTriangle } from 'lucide-react'
+import ResonanceGauge from '../components/ResonanceGauge'
+import GEXCurveChart from '../components/GEXCurveChart'
+import CrossAssetHeatmap from '../components/CrossAssetHeatmap'
+import HistoricalTrend from '../components/HistoricalTrend'
 
 function HawkesProgressBar({ branchingRatio, state }: { branchingRatio: number; state: string }) {
   const pct = Math.min((branchingRatio / 1.0) * 100, 100)
@@ -57,6 +61,9 @@ export default function Dashboard() {
   const { data, isLoading, isError, refetch } = useDashboardScores()
   const { data: recentAlerts } = useRecentAlerts(5)
   const { data: pollingStatus } = useAutoPollingStatus()
+  const { data: gexCurveData, isLoading: gexCurveLoading } = useGEXCurve(30)
+  const { data: heatmapData, isLoading: heatmapLoading } = useCrossAssetHeatmap()
+  const { data: resonanceTrend, isLoading: trendLoading } = useResonanceHistory(30)
 
   // Track when auto-polling was last disabled
   const autoPollingOffSince = useRef<number | null>(null)
@@ -133,7 +140,7 @@ export default function Dashboard() {
   }
 
   const { dimensions, resonance, hawkes } = data
-  const { gex, vix, crypto, darkpool } = dimensions
+  const { gex, vix, crypto, darkpool, cross_asset } = dimensions
   const isLevel3 = resonance.alert_level === 'LEVEL_3'
 
   return (
@@ -168,8 +175,8 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Four dimension cards - responsive grid */}
-      <div className={`grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 ${isStale ? 'opacity-60' : ''}`}>
+      {/* Five dimension cards - responsive grid */}
+      <div className={`grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 ${isStale ? 'opacity-60' : ''}`}>
         {/* GEX Card */}
         <div
           className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4 cursor-pointer hover:border-white/20 transition-all group"
@@ -296,6 +303,44 @@ export default function Dashboard() {
             <span className="text-[10px] text-[var(--text-secondary)]">{darkpool.score.toFixed(1)}/1.5</span>
           </div>
         </div>
+
+        {/* Cross-Asset Card */}
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4 cursor-pointer hover:border-white/20 transition-all">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold">跨资产共振</h3>
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded font-medium"
+              style={{
+                backgroundColor: `${cross_asset.resonance_strength === 'Strong' ? '#22c55e' : cross_asset.resonance_strength === 'Moderate' ? '#eab308' : '#64748b'}20`,
+                color: cross_asset.resonance_strength === 'Strong' ? '#22c55e' : cross_asset.resonance_strength === 'Moderate' ? '#eab308' : '#94a3b8',
+              }}
+            >
+              {cross_asset.resonance_strength === 'None' ? 'NONE' : cross_asset.resonance_strength.toUpperCase()}
+            </span>
+          </div>
+          <div className="text-2xl font-bold mb-1 text-[var(--text-primary)]">{cross_asset.coherence_score.toFixed(0)}</div>
+          <div className="space-y-0.5 text-[10px] text-[var(--text-secondary)]">
+            <div className="flex justify-between"><span>一致性得分</span>
+              <span className={cross_asset.coherence_score > 60 ? 'text-[var(--accent-green)]' : cross_asset.coherence_score > 40 ? 'text-[var(--accent-yellow)]' : 'text-[var(--text-secondary)]'}>
+                {cross_asset.coherence_score.toFixed(1)}/100
+              </span>
+            </div>
+            <div className="flex justify-between"><span>方向</span>
+              <span className={cross_asset.alignment_direction === 'BULLISH' ? 'text-[var(--accent-green)]' : cross_asset.alignment_direction === 'BEARISH' ? 'text-[var(--accent-red)]' : 'text-[var(--text-secondary)]'}>
+                {cross_asset.alignment_direction}
+              </span>
+            </div>
+            <div className="flex justify-between"><span>对齐资产数</span>
+              <span className="text-[var(--text-primary)]">{cross_asset.alignment_count}/4</span>
+            </div>
+          </div>
+          <div className="mt-2 flex items-center gap-1">
+            <div className="flex-1 h-1 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+              <div className="h-full bg-[#8b5cf6] rounded-full transition-all duration-700" style={{ width: `${cross_asset.coherence_score}%` }} />
+            </div>
+            <span className="text-[10px] text-[var(--text-secondary)]">{cross_asset.score.toFixed(1)}/0.15</span>
+          </div>
+        </div>
       </div>
 
       {/* Resonance Banner */}
@@ -321,7 +366,8 @@ export default function Dashboard() {
             { pct: 30, color: '#22c55e30' },    // GEX 1.5/5.0
             { pct: 50, color: '#3b82f630' },     // VIX 1.0/5.0
             { pct: 70, color: '#eab30830' },      // Crypto 1.0/5.0
-            { pct: 100, color: '#a855f730' },     // Darkpool 1.5/5.0
+            { pct: 85, color: '#a855f730' },      // Darkpool 0.75/5.0
+            { pct: 100, color: '#8b5cf630' },     // Cross-Asset 0.75/5.0
           ].map((div) => (
             <div key={div.pct} className="absolute top-0 bottom-0 w-px bg-white/20" style={{ left: `${div.pct}%` }} />
           ))}
@@ -347,7 +393,8 @@ export default function Dashboard() {
             { label: 'GEX', active: gex.score > 0, score: gex.score, max: 1.5 },
             { label: 'VIX', active: vix.score > 0, score: vix.score, max: 1.0 },
             { label: 'Crypto', active: crypto.score > 0, score: crypto.score, max: 1.0 },
-            { label: 'Darkpool', active: darkpool.score > 0, score: darkpool.score, max: 1.5 },
+            { label: 'Darkpool', active: darkpool.score > 0, score: darkpool.score, max: 0.75 },
+            { label: 'Cross-Asset', active: cross_asset.coherence_score > 50, score: cross_asset.coherence_score, max: 100 },
             { label: 'Hawkes', active: hawkes.branching_ratio < 0.7, score: hawkes.branching_ratio, max: 0 },
           ].map((cond) => (
             <span
@@ -368,6 +415,16 @@ export default function Dashboard() {
 
       {/* Hawkes Progress Bar */}
       <HawkesProgressBar branchingRatio={hawkes.branching_ratio} state={hawkes.state} />
+
+      {/* Resonance Gauge + Charts Row */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <ResonanceGauge resonance={resonance} />
+        <GEXCurveChart data={gexCurveData} isLoading={gexCurveLoading} />
+        <HistoricalTrend data={resonanceTrend} isLoading={trendLoading} />
+      </div>
+
+      {/* Cross-Asset Heatmap */}
+      <CrossAssetHeatmap data={heatmapData} isLoading={heatmapLoading} />
 
       {/* Recent alerts */}
       {recentAlerts && recentAlerts.length > 0 && (

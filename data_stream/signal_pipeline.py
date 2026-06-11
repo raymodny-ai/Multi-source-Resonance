@@ -389,11 +389,19 @@ class SignalPipeline:
                 short_ratio > 45.0,
                 confirmed_signal,
                 golden_cross,
+                # v2.1 暗盘EMA预处理字段
+                self._darkpool_preprocessed.get('latest_v_net'),
+                self._darkpool_preprocessed.get('latest_ema_fast'),
+                self._darkpool_preprocessed.get('latest_ema_slow'),
+                self._darkpool_preprocessed.get('zero_cross', {}).get('signal'),
+                self._darkpool_preprocessed.get('momentum_reversal', {}).get('signal'),
             )
 
             logger.info(
                 f"Darkpool维度写入: AXLFI DP=${latest_dp:,.0f}, "
-                f"Short={short_ratio:.1f}%, DBMF={dbmf_recovery}"
+                f"Short={short_ratio:.1f}%, DBMF={dbmf_recovery}, "
+                f"V_net={self._darkpool_preprocessed.get('latest_v_net', 0):,.0f}, "
+                f"ZCross={self._darkpool_preprocessed.get('zero_cross', {}).get('signal')}"
             )
 
         except Exception as e:
@@ -506,19 +514,19 @@ class SignalPipeline:
             )
 
             if not latest_gex:
-                logger.warning("GEX数据缺失, 跳过共振评分")
-                return
-
-            # 计算各维度分值 (CPU密集型 → executor)
-            gex_score = await loop.run_in_executor(
-                self._executor,
-                lambda: self._resonance_scorer.calculate_gex_score(
-                    gex_local=latest_gex['gex_local'],
-                    gex_calibrated=latest_gex['gex_calibrated'],
-                    flip_zone_crossed=latest_gex['gex_calibrated'] > 0,
-                    gex_trend='IMPROVING',
-                ),
-            )
+                logger.warning("GEX数据缺失，该维度记0分，继续部分评估")
+                gex_score = {'score': 0.0, 'state': 'MISSING', 'details': 'GEX数据缺失'}
+            else:
+                # 计算各维度分值 (CPU密集型 → executor)
+                gex_score = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self._resonance_scorer.calculate_gex_score(
+                        gex_local=latest_gex['gex_local'],
+                        gex_calibrated=latest_gex['gex_calibrated'],
+                        flip_zone_crossed=latest_gex['gex_calibrated'] > 0,
+                        gex_trend='IMPROVING',
+                    ),
+                )
 
             vix_score = await loop.run_in_executor(
                 self._executor,

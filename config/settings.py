@@ -62,6 +62,28 @@ class Config:
     SQUEEZEMETRICS_API_KEY: str = os.getenv('SQUEEZEMETRICS_API_KEY', '')
     SQUEEZEMETRICS_BASE_URL: str = 'https://api.squeezemetrics.com'
     
+    # ==================== LLM 推理配置 (V2.0 Layer 3) ====================
+    
+    # LLM Provider 选择: 'openai' / 'anthropic' / 'local'
+    LLM_PROVIDER: str = os.getenv('LLM_PROVIDER', 'openai')
+    
+    # OpenAI 配置
+    OPENAI_API_KEY: str = os.getenv('OPENAI_API_KEY', '')
+    OPENAI_MODEL: str = os.getenv('OPENAI_MODEL', 'gpt-4o')
+    OPENAI_ORGANIZATION: str = os.getenv('OPENAI_ORGANIZATION', '')
+    OPENAI_BASE_URL: str = os.getenv('OPENAI_BASE_URL', '')
+    
+    # Anthropic 配置
+    ANTHROPIC_API_KEY: str = os.getenv('ANTHROPIC_API_KEY', '')
+    ANTHROPIC_MODEL: str = os.getenv('ANTHROPIC_MODEL', 'claude-sonnet-4-20250514')
+    ANTHROPIC_BASE_URL: str = os.getenv('ANTHROPIC_BASE_URL', '')
+    
+    # LLM 通用参数
+    LLM_TEMPERATURE: float = float(os.getenv('LLM_TEMPERATURE', '0.3'))
+    LLM_MAX_TOKENS: int = int(os.getenv('LLM_MAX_TOKENS', '2000'))
+    LLM_TIMEOUT: int = int(os.getenv('LLM_TIMEOUT', '60'))
+    LLM_MAX_RETRIES: int = int(os.getenv('LLM_MAX_RETRIES', '3'))
+    
     # ==================== 通知配置 ====================
     
     # SMTP邮件配置
@@ -152,6 +174,17 @@ class Config:
         'TSLA',  # Tesla Inc.
         'AMD',   # Advanced Micro Devices
     ]
+    
+    # ==================== 管道配置 (V2.0) ====================
+    
+    # 流水线输出目录
+    PIPELINE_OUTPUT_DIR: str = os.getenv('PIPELINE_OUTPUT_DIR', './reports')
+    
+    # 回测历史天数
+    PIPELINE_HISTORY_DAYS: int = int(os.getenv('PIPELINE_HISTORY_DAYS', '90'))
+    
+    # 并行工作数
+    PIPELINE_PARALLEL_WORKERS: int = int(os.getenv('PIPELINE_PARALLEL_WORKERS', '4'))
     
     # ==================== 系统配置 ====================
     
@@ -255,6 +288,11 @@ class Config:
         
         if not cls.TELEGRAM_BOT_TOKEN or not cls.TELEGRAM_CHAT_ID:
             warnings.append("Telegram配置不完整,可选功能将禁用")
+        
+        if not cls.DISCORD_WEBHOOK_URL:
+            warnings.append("Discord Webhook URL未配置, Discord告警将禁用")
+        else:
+            warnings.append("Discord Webhook 已配置, 告警可推送")
         
         # 输出警告
         if warnings:

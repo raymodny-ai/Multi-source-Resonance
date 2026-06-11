@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { useAlerts, useAcknowledgeAlert } from '../api/alerts'
-import { useIncidents, useIncidentDetail } from '../api/incidents'
+import { useIncidents, useIncidentDetail, useReviewIncident, useExportIncident } from '../api/incidents'
 import { useNotificationStatus, useNotificationConfig, useTestNotification, useUpdateNotificationConfig } from '../api/notifications'
 import { useTimezoneStore } from '../stores/timezoneStore'
 import { formatDateTime, formatRelativeTime } from '../utils/time'
 import { ALERT_LEVEL_COLORS, ALERT_LEVEL_LABELS } from '../types/common'
 import type { AlertLevel } from '../types/common'
-import { ChevronDown, ChevronRight, RefreshCw, Zap } from 'lucide-react'
+import { ChevronDown, ChevronRight, RefreshCw, Zap, CheckCircle, FileDown } from 'lucide-react'
 
 export default function AlertCenter() {
   const [viewMode, setViewMode] = useState<'incidents' | 'alerts'>('incidents')
@@ -35,6 +35,10 @@ export default function AlertCenter() {
   const testMutation = useTestNotification()
   const updateNotifConfig = useUpdateNotificationConfig()
 
+  // Incident actions
+  const reviewIncident = useReviewIncident()
+  const exportIncident = useExportIncident()
+
   const alerts = alertsData?.data ?? []
   const total = alertsData?.total ?? 0
   const totalPages = Math.ceil(total / 20)
@@ -53,6 +57,29 @@ export default function AlertCenter() {
     updateNotifConfig.mutate({ cooldown_minutes: cooldownVal })
     setCooldownSaved(true)
     setTimeout(() => setCooldownSaved(false), 3000)
+  }
+
+  const handleExportAlertsCSV = () => {
+    const header = '时间,等级,得分,维度,Hawkes,状态'
+    const rows = alerts.map((a) =>
+      [
+        formatDateTime(a.trigger_time, timezone),
+        ALERT_LEVEL_LABELS[a.alert_level] || a.alert_level,
+        a.total_score.toFixed(1),
+        Object.entries(a.dimension_scores).filter(([, v]) => v > 0).map(([k]) => k).join('+') || '--',
+        a.hawkes_branching_ratio.toFixed(2),
+        a.acknowledged ? '已确认' : '未确认',
+      ].map((v) => `"${v}"`).join(',')
+    )
+    const csv = [header, ...rows].join('\n')
+    const bom = '\uFEFF'
+    const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `alerts-export-${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   return (
@@ -142,6 +169,20 @@ export default function AlertCenter() {
                       </p>
                     </div>
                     <span className="text-[10px] text-[var(--text-secondary)]">{formatRelativeTime(inc.start_time)}</span>
+                    {/* Review/Export actions */}
+                    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                      {!inc.reviewed && (
+                        <button
+                          onClick={() => reviewIncident.mutate(inc.id)}
+                          disabled={reviewIncident.isPending}
+                          className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md border border-[var(--accent-green)]/30 text-[var(--accent-green)] hover:bg-[var(--accent-green)]/10 transition-colors"
+                          title="标记为已复盘"
+                        >
+                          <CheckCircle size={10} />
+                          复盘
+                        </button>
+                      )}
+                    </div>
                   </button>
 
                   {/* Expanded triggers */}
@@ -160,6 +201,21 @@ export default function AlertCenter() {
                       </div>
                     </div>
                   )}
+                  {/* Export button for expanded incident */}
+                  {isExpanded && (
+                    <div className="border-t border-[var(--border)] px-4 py-2 bg-[var(--bg-primary)]/30 flex justify-end">
+                      <button
+                        onClick={() => {
+                          if (incidentDetail) exportIncident.mutate(incidentDetail)
+                        }}
+                        disabled={exportIncident.isPending || !incidentDetail}
+                        className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md border border-[var(--border)] text-[var(--text-secondary)] hover:text-white hover:border-white/30 transition-colors"
+                      >
+                        <FileDown size={10} />
+                        导出报告 JSON
+                      </button>
+                    </div>
+                  )}
                 </div>
               )
             })
@@ -176,6 +232,17 @@ export default function AlertCenter() {
             <div className="p-6 text-center text-[var(--text-secondary)] text-xs">暂无告警记录</div>
           ) : (
             <>
+              {/* Export toolbar */}
+              <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--border)]">
+                <span className="text-[10px] text-[var(--text-secondary)]">共 {total} 条告警</span>
+                <button
+                  onClick={handleExportAlertsCSV}
+                  className="flex items-center gap-1 text-[10px] px-2 py-1 rounded-md border border-[var(--border)] text-[var(--text-secondary)] hover:text-white hover:border-white/30 transition-colors"
+                >
+                  <FileDown size={10} />
+                  导出 CSV
+                </button>
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>

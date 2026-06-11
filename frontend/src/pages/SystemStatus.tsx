@@ -1,16 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useSystemStatus, createLogStream, useTriggerManualCollect, useAutoPollingStatus, useSetAutoPolling } from '../api/system'
+import { useSystemStatus, createLogStream, useTriggerManualCollect } from '../api/system'
 import { formatRelativeTime } from '../utils/time'
-import type { SourceStatus } from '../types/api'
-import { Pause, Play, Trash2, AlertTriangle, Download, Zap, ZapOff } from 'lucide-react'
+import type { SourceStatus, ManualCollectResult } from '../types/api'
+import { Pause, Play, Trash2, AlertTriangle, Download, CheckCircle, XCircle, Clock } from 'lucide-react'
 
 function SourceCard({ source }: { source: SourceStatus }) {
   const statusConfig = {
-    ONLINE: { color: 'bg-[var(--accent-green)]', border: 'border-[var(--accent-green)]/20', label: '🟢 正常', bg: 'bg-[var(--accent-green)]/5' },
-    DEGRADED: { color: 'bg-[var(--accent-yellow)]', border: 'border-[var(--accent-yellow)]/20', label: '🟡 降级', bg: 'bg-[var(--accent-yellow)]/5' },
-    OFFLINE: { color: 'bg-[var(--accent-red)]', border: 'border-[var(--accent-red)]/20', label: '🔴 故障', bg: 'bg-[var(--accent-red)]/5' },
+    ONLINE: { color: 'bg-[var(--accent-green)]', border: 'border-[var(--accent-green)]/20', label: '🟢 正常', bg: 'bg-[var(--accent-green)]/5', icon: CheckCircle },
+    DEGRADED: { color: 'bg-[var(--accent-yellow)]', border: 'border-[var(--accent-yellow)]/20', label: '🟡 待采集', bg: 'bg-[var(--accent-yellow)]/5', icon: Clock },
+    OFFLINE: { color: 'bg-[var(--accent-red)]', border: 'border-[var(--accent-red)]/20', label: '🔴 失败', bg: 'bg-[var(--accent-red)]/5', icon: XCircle },
   }
   const config = statusConfig[source.status]
+  const Icon = config.icon
 
   return (
     <div className={`${config.bg} border ${config.border} rounded-lg p-3 transition-all hover:border-white/10`}>
@@ -18,11 +19,19 @@ function SourceCard({ source }: { source: SourceStatus }) {
         <span className="text-xs font-semibold text-[var(--text-primary)]">{source.name}</span>
         <span className={`w-2 h-2 rounded-full ${config.color} ${source.status === 'OFFLINE' ? 'animate-pulse' : ''}`} />
       </div>
-      <p className="text-[10px] text-[var(--text-secondary)]">{config.label}</p>
+      <div className="flex items-center gap-1 text-[10px] text-[var(--text-secondary)]">
+        <Icon size={10} />
+        <span>{config.label}</span>
+      </div>
       <p className="text-[10px] text-[var(--text-secondary)] mt-1">
-        {source.method} · {source.availability_pct.toFixed(0)}% 可用
-        {source.failure_count > 0 && <span className="text-[var(--accent-red)]"> · {source.failure_count}次失败</span>}
+        {source.method}
+        {source.last_elapsed_sec != null && <span className="ml-1 text-[var(--text-primary)]">· {source.last_elapsed_sec}s</span>}
       </p>
+      {source.last_error && (
+        <p className="text-[10px] text-[var(--accent-red)] mt-0.5 truncate" title={source.last_error}>
+          {source.last_error}
+        </p>
+      )}
     </div>
   )
 }
@@ -31,9 +40,7 @@ type LogEntry = { line: string; level: string; id: number }
 
 export default function SystemStatus() {
   const { data, isLoading, isError } = useSystemStatus()
-  const { data: pollingStatus } = useAutoPollingStatus()
   const manualCollect = useTriggerManualCollect()
-  const setAutoPolling = useSetAutoPolling()
   const [logPaused, setLogPaused] = useState(false)
   const [errorOnly, setErrorOnly] = useState(false)
   const [logs, setLogs] = useState<LogEntry[]>([])
@@ -44,33 +51,13 @@ export default function SystemStatus() {
   // Toast notification state
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
 
-  // Auto-polling state: sync from server, fallback to localStorage
-  const [localAutoPolling, setLocalAutoPolling] = useState<boolean>(() => {
-    const stored = localStorage.getItem('auto-polling-enabled')
-    return stored !== null ? stored === 'true' : true
-  })
-
-  // Sync server state to local when available
-  useEffect(() => {
-    if (pollingStatus !== undefined) {
-      setLocalAutoPolling(pollingStatus.enabled)
-      localStorage.setItem('auto-polling-enabled', String(pollingStatus.enabled))
-    }
-  }, [pollingStatus])
-
-  // Auto-polling derived from server or local fallback
-  const autoPollingEnabled = pollingStatus?.enabled ?? localAutoPolling
-
-  const handleToggleAutoPolling = useCallback(() => {
-    const next = !autoPollingEnabled
-    setLocalAutoPolling(next)
-    localStorage.setItem('auto-polling-enabled', String(next))
-    setAutoPolling.mutate(next)
-  }, [autoPollingEnabled, setAutoPolling])
+  // Manual collect result state (for persisting last results)
+  const [lastResult, setLastResult] = useState<ManualCollectResult | null>(null)
 
   const handleManualCollect = useCallback(() => {
     manualCollect.mutate(undefined, {
       onSuccess: (result) => {
+        setLastResult(result)
         setToast({
           type: result.success_count === result.total_sources ? 'success' : 'error',
           message: result.summary,
@@ -85,7 +72,7 @@ export default function SystemStatus() {
   // Auto-dismiss toast
   useEffect(() => {
     if (!toast) return
-    const timer = setTimeout(() => setToast(null), 5000)
+    const timer = setTimeout(() => setToast(null), 8000)
     return () => clearTimeout(timer)
   }, [toast])
 
@@ -119,18 +106,18 @@ export default function SystemStatus() {
     <div className="space-y-4 max-w-[1600px]">
       <div className="flex items-center gap-3">
         <h1 className="text-xl font-bold">系统状态监控</h1>
-        <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--accent-blue)]/20 text-[var(--accent-blue)] font-mono">build 20260611-0843</span>
+        <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--accent-yellow)]/20 text-[var(--accent-yellow)] font-mono">
+          手动采集模式
+        </span>
       </div>
 
-      {/* Auto-polling disabled warning banner */}
-      {!autoPollingEnabled && (
-        <div className="bg-[var(--accent-yellow)]/10 border border-[var(--accent-yellow)]/30 rounded-xl p-3 flex items-center gap-2">
-          <AlertTriangle size={16} className="text-[var(--accent-yellow)] shrink-0" />
-          <span className="text-xs text-[var(--accent-yellow)] font-medium">
-            ⚠️ 自动轮询已暂停，数据可能过时，请手动采集
-          </span>
-        </div>
-      )}
+      {/* Manual-only mode banner */}
+      <div className="bg-[var(--accent-blue)]/10 border border-[var(--accent-blue)]/30 rounded-xl p-3 flex items-center gap-2">
+        <Clock size={16} className="text-[var(--accent-blue)] shrink-0" />
+        <span className="text-xs text-[var(--accent-blue)] font-medium">
+          系统运行在手动采集模式 — 点击下方按钮触发数据拉取 (6 数据源: GEX/DIX · VIX期限 · AXLFI暗盘 · DBMF · 加密衍生品 · 做空数据)
+        </span>
+      </div>
 
       {/* Toast notification */}
       {toast && (
@@ -146,37 +133,19 @@ export default function SystemStatus() {
       {/* Data source connectivity matrix */}
       <section>
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-semibold">爬虫连通性矩阵</h2>
-          <div className="flex items-center gap-2">
-            {/* Auto-polling Toggle */}
-            <button
-              onClick={handleToggleAutoPolling}
-              disabled={setAutoPolling.isPending}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] rounded-lg font-medium transition-all ${
-                autoPollingEnabled
-                  ? 'bg-[var(--accent-green)]/15 text-[var(--accent-green)] border border-[var(--accent-green)]/30 hover:bg-[var(--accent-green)]/25'
-                  : 'bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)] border border-[var(--accent-yellow)]/30 hover:bg-[var(--accent-yellow)]/25'
-              }`}
-              title={autoPollingEnabled ? '自动轮询已开启' : '自动轮询已关闭'}
-            >
-              {autoPollingEnabled ? <Zap size={13} /> : <ZapOff size={13} />}
-              {autoPollingEnabled ? '自动轮询' : '已暂停'}
-            </button>
-
-            {/* Manual Collect Button */}
-            <button
-              onClick={handleManualCollect}
-              disabled={manualCollect.isPending}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] rounded-lg font-medium bg-[var(--accent-blue)] text-white hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              title="手动采集全部数据"
-            >
-              <Download size={13} className={manualCollect.isPending ? 'animate-spin' : ''} />
-              {manualCollect.isPending ? '采集中...' : '手动采集全部数据'}
-            </button>
-          </div>
+          <h2 className="text-sm font-semibold">数据源连通性矩阵</h2>
+          <button
+            onClick={handleManualCollect}
+            disabled={manualCollect.isPending}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] rounded-lg font-medium bg-[var(--accent-blue)] text-white hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            title="手动采集全部 6 数据源"
+          >
+            <Download size={13} className={manualCollect.isPending ? 'animate-spin' : ''} />
+            {manualCollect.isPending ? '采集中...' : '手动采集全部数据'}
+          </button>
         </div>
 
-        {/* Manual collect progress indicator */}
+        {/* Manual collect progress */}
         {manualCollect.isPending && (
           <div className="mb-3 flex items-center gap-2 bg-[var(--accent-blue)]/10 border border-[var(--accent-blue)]/20 rounded-lg px-3 py-2">
             <Download size={12} className="text-[var(--accent-blue)] animate-spin" />
@@ -187,8 +156,8 @@ export default function SystemStatus() {
         )}
 
         {isLoading ? (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3">
-            {[1, 2, 3, 4, 5, 6, 7].map((i) => (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+            {[1, 2, 3, 4, 5, 6].map((i) => (
               <div key={i} className="h-24 rounded-lg skeleton" />
             ))}
           </div>
@@ -197,63 +166,70 @@ export default function SystemStatus() {
             <p className="text-xs text-[var(--accent-red)]">无法获取系统状态</p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3">
-            {data.sources.map((source) => (
-              <SourceCard key={source.name} source={source} />
-            ))}
-          </div>
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+              {data.sources.map((source) => (
+                <SourceCard key={source.name} source={source} />
+              ))}
+            </div>
+            {/* Last manual collect summary */}
+            {data.last_manual_collect && (
+              <p className="text-[10px] text-[var(--text-secondary)] mt-2">
+                上次采集: {formatRelativeTime(data.last_manual_collect)}
+                {data.last_collect_summary && <span className="ml-2">— {data.last_collect_summary}</span>}
+              </p>
+            )}
+          </>
         )}
       </section>
 
-      {/* Degradation + Circuit Breaker + Scheduler */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* Degradation mode */}
-        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
-          <h3 className="text-sm font-semibold mb-3">降级模式</h3>
-          <div className={`inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg ${
-            data?.degradation_mode ? 'bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)]' : 'bg-[var(--accent-green)]/15 text-[var(--accent-green)]'
-          }`}>
-            <span className={`w-2 h-2 rounded-full ${data?.degradation_mode ? 'bg-[var(--accent-yellow)]' : 'bg-[var(--accent-green)]'}`} />
-            {data?.degradation_mode ? 'PARTIAL 降级' : 'FULL 全功能'}
-          </div>
-          {data?.degradation_mode && data.degradation_details.failed_sources.length > 0 && (
-            <p className="text-[10px] text-[var(--accent-yellow)] mt-2">
-              <AlertTriangle size={10} className="inline mr-1" />
-              失败源: {data.degradation_details.failed_sources.join(', ')}
-            </p>
-          )}
-        </div>
-
-        {/* Circuit breaker states */}
-        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
-          <h3 className="text-sm font-semibold mb-3">熔断器状态</h3>
+      {/* Detailed Collect Results */}
+      {lastResult && (
+        <section className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
+          <h3 className="text-sm font-semibold mb-3">
+            最近采集详情
+            <span className="ml-2 text-[10px] font-normal text-[var(--text-secondary)]">
+              {lastResult.collected_at ? formatRelativeTime(lastResult.collected_at) : ''}
+            </span>
+          </h3>
           <div className="space-y-1.5">
-            {data?.degradation_details.circuit_breaker_states ? (
-              Object.entries(data.degradation_details.circuit_breaker_states).map(([source, state]) => (
-                <div key={source} className="flex items-center justify-between text-[10px]">
-                  <span className="text-[var(--text-secondary)]">{source}</span>
-                  <span className={`px-1.5 py-0.5 rounded font-medium ${
-                    state === 'CLOSED' ? 'bg-[var(--accent-green)]/15 text-[var(--accent-green)]' :
-                    state === 'OPEN' ? 'bg-[var(--accent-red)]/15 text-[var(--accent-red)]' :
-                    'bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)]'
-                  }`}>{state}</span>
-                </div>
-              ))
-            ) : (
-              <p className="text-[10px] text-[var(--text-secondary)]">加载中...</p>
-            )}
+            {lastResult.sources.map((src) => (
+              <div key={src.name} className="flex items-center gap-3 text-[11px] py-1.5 px-3 rounded-lg bg-[var(--bg-primary)]">
+                <span className={`shrink-0 ${src.status === 'success' ? 'text-[var(--accent-green)]' : 'text-[var(--accent-red)]'}`}>
+                  {src.status === 'success' ? <CheckCircle size={13} /> : <XCircle size={13} />}
+                </span>
+                <span className="w-24 font-medium text-[var(--text-primary)]">{src.name}</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                  src.status === 'success' ? 'bg-[var(--accent-green)]/15 text-[var(--accent-green)]' : 'bg-[var(--accent-red)]/15 text-[var(--accent-red)]'
+                }`}>
+                  {src.status === 'success' ? '成功' : '失败'}
+                </span>
+                <span className="text-[var(--text-secondary)]">{src.elapsed_sec}s</span>
+                {src.error && <span className="text-[var(--accent-red)] truncate flex-1" title={src.error}>{src.error}</span>}
+              </div>
+            ))}
           </div>
-        </div>
+          <div className="mt-3 flex items-center gap-2 text-xs">
+            <span className={`px-2 py-0.5 rounded font-medium ${
+              lastResult.success_count === lastResult.total_sources ? 'bg-[var(--accent-green)]/15 text-[var(--accent-green)]' : 'bg-[var(--accent-yellow)]/15 text-[var(--accent-yellow)]'
+            }`}>
+              {lastResult.success_count}/{lastResult.total_sources} 成功
+            </span>
+            <span className="text-[var(--text-secondary)]">总耗时 {lastResult.total_elapsed_sec}s</span>
+          </div>
+        </section>
+      )}
 
-        {/* Scheduler + DB */}
+      {/* Scheduler + DB */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
-          <h3 className="text-sm font-semibold mb-3">调度器 & 数据库</h3>
+          <h3 className="text-sm font-semibold mb-3">系统状态</h3>
           <div className="space-y-2 text-[10px]">
             <div className="flex items-center justify-between">
               <span className="text-[var(--text-secondary)]">调度器</span>
-              <span className={`flex items-center gap-1 ${data?.scheduler_running ? 'text-[var(--accent-green)]' : 'text-[var(--accent-red)]'}`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${data?.scheduler_running ? 'bg-[var(--accent-green)]' : 'bg-[var(--accent-red)]'}`} />
-                {data?.scheduler_running ? '运行中' : '已停止'}
+              <span className="flex items-center gap-1 text-[var(--accent-yellow)]">
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent-yellow)]" />
+                手动模式 (无自动任务)
               </span>
             </div>
             <div className="flex items-center justify-between">
@@ -263,6 +239,26 @@ export default function SystemStatus() {
             <div className="flex items-center justify-between">
               <span className="text-[var(--text-secondary)]">上次备份</span>
               <span className="text-[var(--text-primary)]">{data?.last_backup_time ? formatRelativeTime(data.last_backup_time) : '--'}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
+          <h3 className="text-sm font-semibold mb-3">采集统计</h3>
+          <div className="space-y-2 text-[10px]">
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--text-secondary)]">上次采集</span>
+              <span className="text-[var(--text-primary)]">
+                {data?.last_manual_collect ? formatRelativeTime(data.last_manual_collect) : '尚未采集'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--text-secondary)]">采集模式</span>
+              <span className="text-[var(--accent-blue)]">纯手动触发</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--text-secondary)]">自动轮询</span>
+              <span className="text-[var(--accent-red)]">已永久禁用</span>
             </div>
           </div>
         </div>
@@ -302,7 +298,12 @@ export default function SystemStatus() {
             filteredLogs.map((log) => (
               <p
                 key={log.id}
-                className={log.level === 'ERROR' ? 'text-[var(--accent-red)]' : 'text-[var(--text-secondary)]'}
+                className={
+                  log.level === 'ERROR' ? 'text-[var(--accent-red)]' :
+                  log.level === 'WARN' ? 'text-[var(--accent-yellow)]' :
+                  log.level === 'SUCCESS' ? 'text-[var(--accent-green)]' :
+                  'text-[var(--text-secondary)]'
+                }
               >
                 {log.line}
               </p>

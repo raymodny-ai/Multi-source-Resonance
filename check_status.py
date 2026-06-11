@@ -63,18 +63,26 @@ try:
 except Exception as e:
     results.append(('Yahoo Finance', '❌', str(e)[:60]))
 
-# ─── 4. ChartExchange ───
+# ─── 4. 做空数据 (yfinance → FINRA) ───
 try:
-    from data_fetchers.chartexchange_fetcher import ChartExchangeFetcher
-    ce = ChartExchangeFetcher()
-    sv = ce.fetch_short_volume_data('SPY')
-    if sv:
-        short_ratio = sv.get('off_exchange_short_ratio', sv.get('short_vol_pct', 0))
-        results.append(('ChartExchange', '✅', f"SPY暗盘做空比={short_ratio:.1f}%"))
+    from data_fetchers.yahoo_finance_fetcher import YahooFinanceFetcher
+    from data_fetchers.finra_fetcher import FINRAShortVolumeFetcher
+    yf_fetcher = YahooFinanceFetcher(mock_mode=False)
+    finra = FINRAShortVolumeFetcher()
+    short_data = yf_fetcher.get_short_interest('SPY')
+    if short_data and short_data.get('short_pct_float') is not None:
+        short_ratio = short_data['short_pct_float']
+        results.append(('做空数据(yf)', '✅', f"SPY 做空比={short_ratio:.1f}%"))
     else:
-        results.append(('ChartExchange', '⚠️', 'API 返回空'))
+        # 降级到 FINRA
+        spy_data = finra.fetch_short_volume_data('SPY')
+        if spy_data:
+            short_ratio = finra.calculate_off_exchange_short_ratio(spy_data)
+            results.append(('做空数据(FINRA)', '⚠️', f"SPY 场外做空比={short_ratio:.1f}%"))
+        else:
+            results.append(('做空数据', '⚠️', 'yfinance/FINRA 均返回空'))
 except Exception as e:
-    results.append(('ChartExchange', '❌', str(e)[:60]))
+    results.append(('做空数据', '❌', str(e)[:60]))
 
 # ─── 5. CCXT ───
 try:

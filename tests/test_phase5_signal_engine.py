@@ -248,9 +248,10 @@ class TestResonanceScorer(unittest.TestCase):
         
         self.assertEqual(result['state'], 'INSUFFICIENT_DATA')
         self.assertEqual(result['branching_ratio'], 0.5)
+        self.assertEqual(result['method'], 'none')
     
-    def test_hawkes_subcritical(self):
-        """测试亚临界状态 (分支比 < 0.7)"""
+    def test_hawkes_subcritical_corrcoef(self):
+        """测试亚临界状态 (corrcoef 降级, 数据点 < 20)"""
         # 价格下跌与成交量相关性较低
         prices = [-0.5, -0.3, -0.2, -0.4, -0.1, -0.3, -0.2, -0.5, -0.1, -0.2]
         volumes = [1e6, 1.1e6, 1.05e6, 1.2e6, 1.0e6, 1.15e6, 1.08e6, 1.25e6, 1.02e6, 1.1e6]
@@ -260,9 +261,35 @@ class TestResonanceScorer(unittest.TestCase):
         self.assertIn(result['state'], ['SUBCRITICAL', 'CRITICAL'])
         self.assertGreaterEqual(result['branching_ratio'], 0.0)
         self.assertLessEqual(result['branching_ratio'], 1.0)
+        self.assertEqual(result['method'], 'corrcoef')  # <20 数据点 → 降级
+    
+    def test_hawkes_ar1_primary(self):
+        """测试 AR(1) 自回归方法 (>=20 数据点, 主力路径)"""
+        import numpy as np
+        np.random.seed(42)  # 固定种子保证可复现
+        
+        # 生成强自相关价格序列: AR(1) ρ ≈ 0.75
+        rho_true = 0.75
+        n = 30
+        eps = np.random.normal(0, 0.3, n)
+        y = np.zeros(n)
+        y[0] = -3.0
+        for t in range(1, n):
+            y[t] = rho_true * y[t-1] + eps[t]
+        prices = list(y)
+        volumes = list(np.random.uniform(1e6, 3e6, n))
+        
+        result = self.scorer.estimate_hawkes_branching_ratio(prices, volumes)
+        
+        self.assertEqual(result['method'], 'AR(1)')
+        self.assertGreaterEqual(result['branching_ratio'], 0.0)
+        self.assertLessEqual(result['branching_ratio'], 1.0)
+        # AR(1) ρ_true=0.75 → branching_ratio 应该接近 0.75
+        self.assertGreaterEqual(result['branching_ratio'], 0.3)
+        self.assertIn(result['state'], ['SUBCRITICAL', 'CRITICAL', 'SUPERCRITICAL'])
     
     def test_hawkes_with_real_data(self):
-        """测试真实场景数据"""
+        """测试真实场景数据 (corrcoef 降级)"""
         # 模拟恐慌抛售: 价格大幅下跌伴随成交量激增
         prices = [-1.5, -2.0, -1.8, -2.5, -1.2, -1.9, -2.3, -1.7, -2.1, -1.6]
         volumes = [2e6, 3e6, 2.8e6, 3.5e6, 2.2e6, 3.2e6, 3.8e6, 2.9e6, 3.3e6, 2.7e6]
@@ -271,6 +298,7 @@ class TestResonanceScorer(unittest.TestCase):
         
         self.assertIn(result['state'], ['SUBCRITICAL', 'CRITICAL', 'SUPERCRITICAL'])
         self.assertGreater(result['self_excitation_intensity'], 0.0)
+        self.assertIn(result['method'], ['corrcoef', 'AR(1)'])  # 10 点 → corrcoef
 
 
 class TestSignalStateMachine(unittest.TestCase):
@@ -279,6 +307,7 @@ class TestSignalStateMachine(unittest.TestCase):
     def setUp(self):
         """每个测试前初始化状态机"""
         self.sm = SignalStateMachine(cooldown_minutes=30)
+        self.sm.reset()  # 清除持久化文件残留状态，确保测试隔离
         self.eastern = pytz.timezone('US/Eastern')
     
     def create_resonance_result(self, alert_level='LEVEL_3', total_score=4.5):

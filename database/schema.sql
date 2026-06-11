@@ -137,8 +137,71 @@ SELECT * FROM crypto_derivatives
 ORDER BY timestamp DESC
 LIMIT 1;
 
+-- ============================================================
+-- 表5: gateway_snapshots (V2.0 网关快照表)
+-- 存储每日穿过 Layer 2 网关的 JSON 快照，用于审计和回测
+-- ============================================================
+CREATE TABLE IF NOT EXISTS gateway_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date DATE NOT NULL,          -- 快照日期
+    pipeline_run_id TEXT NOT NULL UNIQUE, -- 流水线运行 ID (UUID)
+    snapshot_json TEXT NOT NULL,          -- 完整 GatewayEnvelope JSON
+    schema_version TEXT DEFAULT '2.0.0',  -- Schema 版本
+    data_quality_flag TEXT DEFAULT 'NORMAL', -- NORMAL / DEGRADED / ERROR
+    resonance_score INTEGER DEFAULT 0,   -- 共振得分 (冗余索引字段)
+    processing_duration_ms INTEGER DEFAULT 0, -- 处理耗时 (毫秒)
+    interception_status TEXT DEFAULT 'pass_through', -- pass_through / degraded / blocked
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gateway_date ON gateway_snapshots(snapshot_date DESC);
+CREATE INDEX IF NOT EXISTS idx_gateway_run_id ON gateway_snapshots(pipeline_run_id);
+CREATE INDEX IF NOT EXISTS idx_gateway_quality ON gateway_snapshots(data_quality_flag);
+
+
 -- 未确认警报视图
 CREATE VIEW IF NOT EXISTS v_unacknowledged_alerts AS
 SELECT * FROM signal_alerts
 WHERE acknowledged = FALSE
 ORDER BY trigger_time DESC;
+
+
+-- ============================================================
+-- 表6: validation_audit_log (V2.0 数据校验审计日志表)
+-- 持久化存储所有因 Pandera/Greeks/Parity/Arbitrage/IF 校验
+-- 失败的数据记录，满足 PRD §不可变审计日志 要求。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS validation_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date DATE NOT NULL,           -- 快照日期
+    pipeline_run_id TEXT NOT NULL,         -- 关联的流水线运行 ID
+    check_type TEXT NOT NULL,              -- 校验类型: PANDERA/GREEKS_BOUNDS/PUT_CALL_PARITY/NO_ARBITRAGE/ISO_FOREST
+    severity TEXT NOT NULL DEFAULT 'WARN', -- 严重级别: ERROR/WARN/INFO
+    field_name TEXT,                       -- 违规字段名
+    expected_range TEXT,                   -- 期望范围
+    actual_value TEXT,                     -- 实际值
+    option_type TEXT,                      -- 期权类型 (CALL/PUT)
+    strike REAL,                           -- 行权价
+    expiry TEXT,                           -- 到期日
+    pass_rate_pct REAL,                    -- 当日校验总体通过率 (%)
+    details TEXT,                          -- 详细描述
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_date ON validation_audit_log(snapshot_date DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_run_id ON validation_audit_log(pipeline_run_id);
+CREATE INDEX IF NOT EXISTS idx_audit_check_type ON validation_audit_log(check_type);
+CREATE INDEX IF NOT EXISTS idx_audit_severity ON validation_audit_log(severity);
+
+-- 每日校验通过率视图 (用于 95% 熔断判定)
+CREATE VIEW IF NOT EXISTS v_daily_pass_rate AS
+SELECT
+    snapshot_date,
+    pipeline_run_id,
+    pass_rate_pct,
+    COUNT(*) AS violation_count,
+    SUM(CASE WHEN severity = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
+    SUM(CASE WHEN severity = 'WARN' THEN 1 ELSE 0 END) AS warn_count
+FROM validation_audit_log
+GROUP BY snapshot_date, pipeline_run_id
+ORDER BY snapshot_date DESC;

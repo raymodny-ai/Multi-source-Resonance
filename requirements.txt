@@ -18,6 +18,17 @@ pydantic>=2.0.0
 # Scientific Computing
 scipy>=1.11.0
 
+# Vectorized Option Pricing (Layer 1 V2.0)
+py-vollib-vectorized>=0.1.4
+
+# High-Performance Batch Processing (Layer 1 V2.0)
+polars>=0.20.0
+pyarrow>=14.0.0
+
+# LLM API Clients (Layer 3 V2.0)
+openai>=1.30.0
+anthropic>=0.25.0
+
 # Task Scheduling (deprecated: replaced by WebSocket + EventBus in Push architecture)
 APScheduler>=3.10.0
 
@@ -39,3 +50,6 @@ vix_utils>=0.1.7
 # Web API Server
 fastapi>=0.110.0
 uvicorn>=0.27.0
+
+# System Metrics (Prometheus /health endpoint)
+psutil>=5.9.0

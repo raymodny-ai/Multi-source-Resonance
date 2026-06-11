@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+    Multi-source Resonance V2.0 — Windows Task Scheduler 配置
+    美东时间每日 16:15 触发盘后批处理流水线
+
+    导入方式:
+    1. 打开 Task Scheduler (taskschd.msc)
+    2. 右键 "Task Scheduler Library" → Import Task
+    3. 选择此文件
+    4. 修改 <WorkingDirectory> 和 <Command> 中的实际路径
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>2026-06-11T00:00:00</Date>
+    <Author>Multi-source Resonance V2.0</Author>
+    <Description>Daily post-market batch pipeline: Layer 1 Math → Layer 2 Gateway → Layer 3 LLM → Report</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>2026-06-11T16:15:00-04:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>py</Command>
+      <Arguments>-3 run_pipeline_v2.py</Arguments>
+      <WorkingDirectory>D:\Financial Project\Multi-source Resonance</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

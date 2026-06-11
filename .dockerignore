@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Environment
+.env
+config/.env
+
+# Logs
+logs/
+*.log
+
+# Database
+database/*.db
+database/*.db-shm
+database/*.db-wal
+
+# Test
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Node (前端在 Docker 内单独构建)
+frontend/node_modules/
+frontend/dist/
+
+# Backups
+backups/
+
+# Docs
+*.md
+wiki/
+
+# Data
+data/

@@ -580,12 +580,16 @@ class ResonanceScorer:
         recent_volumes: List[float],
         window_minutes: int = 60
     ) -> Dict[str, any]:
-        """Hawkes Process自激抛售测算 (简化版)
+        """Hawkes Process自激抛售测算 (AR(1) 自回归增强版)
         
         Hawkes Process用于建模金融市场的自激现象：价格下跌引发更多抛售，
         形成正反馈循环。分支比 (branching ratio) 衡量这种自激强度。
         
-        简化算法使用价格下跌与成交量激增的相关性作为分支比代理。
+        v2.1 增强: 使用 AR(1) 自回归系数替代简单 corrcoef，更准确地捕捉
+        价格下跌的自激效应。AR(1) 模型: y_t = ρ * y_{t-1} + ε_t，
+        其中 |ρ| 即为分支比代理 —— ρ 越大，自激效应越强。
+        
+        若数据不足（<20 个点），退化为 corrcoef 方法保持鲁棒性。
         
         Args:
             recent_price_changes: 最近N分钟的价格变化列表 (每分钟一个点，单位: %)
@@ -596,24 +600,17 @@ class ResonanceScorer:
             dict: 包含以下字段:
                 - branching_ratio (float): 分支比 (0~1)
                 - state (str): 状态
-                  'SUBCRITICAL' (<0.7), 'CRITICAL' (0.7~0.9), 
-                  'SUPERCRITICAL' (>0.9), 'INSUFFICIENT_DATA'
                 - self_excitation_intensity (float): 自激强度百分比
                 - details (str): 详细说明文本
+                - method (str): 计算方法 ('AR(1)' 或 'corrcoef')
         
         Examples:
             >>> scorer = ResonanceScorer()
             >>> prices = [-0.5, -0.8, -1.2, -0.3, -0.6, -0.9, -1.5, -0.4]
             >>> volumes = [1e6, 1.5e6, 2e6, 1.2e6, 1.8e6, 2.5e6, 3e6, 1.3e6]
             >>> result = scorer.estimate_hawkes_branching_ratio(prices, volumes)
-            >>> print(result['branching_ratio'])  # 相关性值
+            >>> print(result['branching_ratio'])  # AR(1) 系数
             >>> print(result['state'])  # 'SUBCRITICAL' or 'CRITICAL' etc.
-        
-        References:
-            - Hawkes, A. G. (1971). "Spectra of some self-exciting and mutually 
-              exciting point processes". Biometrika.
-            - Embrechts, O., et al. (2011). "Modelling with Hawkes Processes 
-              in Insurance and Finance".
         """
         try:
             if len(recent_price_changes) < 10 or len(recent_volumes) < 10:
@@ -625,41 +622,81 @@ class ResonanceScorer:
                     'branching_ratio': 0.5,
                     'state': 'INSUFFICIENT_DATA',
                     'self_excitation_intensity': 0.0,
-                    'details': '数据不足,无法计算Hawkes分支比'
+                    'details': '数据不足,无法计算Hawkes分支比',
+                    'method': 'none',
                 }
             
-            # 提取价格下跌时段
-            price_drops = [-p for p in recent_price_changes if p < 0]
-            volume_spikes = [
-                v for v, p in zip(recent_volumes, recent_price_changes) 
-                if p < 0
-            ]
+            # ───── AR(1) 自回归方法 (v2.1 增强) ─────
+            # 使用 OLS 估计 AR(1) 系数: ρ = Cov(y_t, y_{t-1}) / Var(y_{t-1})
+            # 这比 corrcoef 更准确：直接测量当前价格变化对下一时刻的影响强度
+            if len(recent_price_changes) >= 20:
+                try:
+                    y = np.array(recent_price_changes, dtype=float)
+                    y_lag = y[:-1]   # y_{t-1}
+                    y_curr = y[1:]   # y_t
+                    
+                    # OLS 估计 AR(1)
+                    cov = np.cov(y_curr, y_lag, ddof=1)[0, 1]
+                    var_lag = np.var(y_lag, ddof=1)
+                    
+                    if var_lag > 1e-12:
+                        ar1_coef = cov / var_lag
+                        # 分支比 = |AR(1)系数|, 截断到 [0, 1]
+                        branching_ratio = max(0.0, min(1.0, abs(ar1_coef)))
+                        method = 'AR(1)'
+                        logger.debug(
+                            f"AR(1) 分支比: ρ={ar1_coef:.4f}, "
+                            f"|ρ|={branching_ratio:.4f}"
+                        )
+                    else:
+                        # 方差退化 → 降级到 corrcoef
+                        branching_ratio = None
+                        method = None
+                        logger.warning("AR(1) 方差退化，降级到 corrcoef")
+                except Exception as ar1_err:
+                    logger.warning(f"AR(1) 计算失败: {ar1_err}，降级到 corrcoef")
+                    branching_ratio = None
+                    method = None
+            else:
+                # 数据点不足 20 → 降级到 corrcoef
+                branching_ratio = None
+                method = None
+                logger.debug(f"数据点 {len(recent_price_changes)} < 20, 使用 corrcoef 降级方法")
             
-            if len(price_drops) < 5:
-                logger.info("价格下跌样本不足，判定为低自激状态")
-                return {
-                    'branching_ratio': 0.3,
-                    'state': 'SUBCRITICAL',
-                    'self_excitation_intensity': 0.2,
-                    'details': '价格下跌样本不足,判定为低自激状态'
-                }
-            
-            # 计算相关性作为分支比代理
-            try:
-                corr_matrix = np.corrcoef(price_drops, volume_spikes)
+            # ───── corrcoef 降级方案 ─────
+            if branching_ratio is None:
+                # 提取价格下跌时段
+                price_drops = [-p for p in recent_price_changes if p < 0]
+                volume_spikes = [
+                    v for v, p in zip(recent_volumes, recent_price_changes)
+                    if p < 0
+                ]
                 
-                # 检查相关性矩阵是否有效
-                if np.isnan(corr_matrix).any() or np.isinf(corr_matrix).any():
-                    logger.warning("Correlation matrix contains NaN or Inf")
+                if len(price_drops) < 5:
+                    logger.info("价格下跌样本不足，判定为低自激状态")
+                    return {
+                        'branching_ratio': 0.3,
+                        'state': 'SUBCRITICAL',
+                        'self_excitation_intensity': 0.2,
+                        'details': '价格下跌样本不足,判定为低自激状态',
+                        'method': 'corrcoef',
+                    }
+                
+                try:
+                    corr_matrix = np.corrcoef(price_drops, volume_spikes)
+                    if np.isnan(corr_matrix).any() or np.isinf(corr_matrix).any():
+                        logger.warning("Correlation matrix contains NaN or Inf")
+                        branching_ratio = 0.5
+                    else:
+                        correlation = corr_matrix[0, 1]
+                        branching_ratio = max(0.0, min(1.0, correlation))
+                    method = 'corrcoef'
+                except Exception as e:
+                    logger.error(f"Hawks corrcoef error: {e}")
                     branching_ratio = 0.5
-                else:
-                    correlation = corr_matrix[0, 1]
-                    branching_ratio = max(0.0, min(1.0, correlation))  # 截断到[0, 1]
-            except Exception as e:
-                logger.error(f"Hawkes calculation error: {e}")
-                branching_ratio = 0.5
+                    method = 'corrcoef'
             
-            # 判定状态
+            # ───── 判定状态 ─────
             if branching_ratio < 0.7:
                 state = 'SUBCRITICAL'
                 details = (
@@ -683,10 +720,14 @@ class ResonanceScorer:
                 'branching_ratio': round(branching_ratio, 2),
                 'state': state,
                 'self_excitation_intensity': round(branching_ratio * 100, 1),
-                'details': details
+                'details': details,
+                'method': method,
             }
             
-            logger.info(f"Hawkes分支比: {result['branching_ratio']} - {state}")
+            logger.info(
+                f"Hawkes分支比[{method}]: "
+                f"{result['branching_ratio']} - {state}"
+            )
             
             return result
             
@@ -696,5 +737,6 @@ class ResonanceScorer:
                 'branching_ratio': 0.5,
                 'state': 'ERROR',
                 'self_excitation_intensity': 0.0,
-                'details': f'计算异常: {str(e)}'
+                'details': f'计算异常: {str(e)}',
+                'method': 'error',
             }

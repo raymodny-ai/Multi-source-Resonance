@@ -104,64 +104,58 @@ def example_squeezemetrics_fetcher():
         print(f"总Gamma敞口: ${total_gamma:,.0f}")
 
 
-# ==================== 示例5: ChartExchange卖空比率 ====================
-def example_chartexchange_fetcher():
-    """ChartExchange卖空比率获取示例"""
-    from data_fetchers import create_chartexchange_fetcher
+# ==================== 示例5: AXLFI暗盘净头寸 (替代 ChartExchange + Stockgrid) ====================
+def example_axlfi_fetcher():
+    """AXLFI 暗盘净头寸 + 做空数据获取示例
     
-    fetcher = create_chartexchange_fetcher(mock_mode=True)
+    替代已下线的 ChartExchange (卖空比) 和 Stockgrid (暗盘净头寸).
+    axlfi.com 提供公开 REST API，无需 Playwright 爬虫。
+    """
+    from data_fetchers.axlfi_fetcher import create_axlfi_fetcher
     
-    # 获取卖空数据
-    raw_data = fetcher.fetch_short_volume_data('SPY')
-    if raw_data:
-        print(f"获取到字段: {list(raw_data.keys())}")
+    fetcher = create_axlfi_fetcher(mock_mode=True)
     
-    # 计算卖空比例
-    ratio = fetcher.calculate_off_exchange_short_ratio(raw_data)
-    if ratio is not None:
-        print(f"场外卖空比例: {ratio:.2f}%")
-        if ratio > 45.0:
-            print("⚠️ 卖空比例超过45%，机构被动吸筹信号")
-    
-    # 检测连续天数
-    history = [
-        {'date': '2026-06-07', 'short_ratio': 46.5},
-        {'date': '2026-06-08', 'short_ratio': 47.2},
-    ]
-    result = fetcher.check_consecutive_days(history, threshold=45.0, consecutive_days=2)
-    if result:
-        print("✅ 连续2日卖空比>45%，确认机构吸筹")
-
-
-# ==================== 示例6: Stockgrid暗盘净头寸 ====================
-async def example_stockgrid_fetcher():
-    """Stockgrid暗盘净头寸获取示例（异步）"""
-    from data_fetchers import create_stockgrid_fetcher
-    
-    fetcher = create_stockgrid_fetcher(mock_mode=True)
-    
-    # 爬取净头寸历史数据
-    data = await fetcher.scrape_net_position_history('SPY', [20, 60, 120])
+    # 获取暗盘净头寸历史 (252天)
+    data = fetcher.fetch_symbol_data('SPY', window=252)
     if data:
-        print(f"20日周期: {len(data['20d'])}个数据点")
-        print(f"60日周期: {len(data['60d'])}个数据点")
-        print(f"120日周期: {len(data['120d'])}个数据点")
-        
-        # 检测底背离
-        net_pos = data['20d']
-        prices = [450 - i * 2 for i in range(len(net_pos))]  # 模拟价格下跌
-        
-        divergence = fetcher.detect_bottom_divergence(net_pos, prices)
-        print(f"底背离检测: {divergence['divergence']}")
-        print(f"净头寸斜率: {divergence['slope_20d']:.4f}")
-        print(f"价格趋势: {divergence['price_trend']}")
-        print(f"净头寸趋势: {divergence['position_trend']}")
+        print(f"数据日期: {data['as_of_date']}")
+        print(f"净头寸序列: {len(data.get('dollar_dp_position', []))} 天")
+        if data.get('dollar_dp_position'):
+            latest_dp = data['dollar_dp_position'][-1]
+            print(f"最新净头寸: ${latest_dp:,.0f}")
     
-    # 清理资源
-    await fetcher.cleanup()
+    # 获取净头寸序列 (兼容旧接口)
+    net_pos = fetcher.get_net_position_series('SPY', [20, 60])
+    if net_pos:
+        print(f"20日净头寸: {len(net_pos.get('20d', []))} 点")
+        print(f"60日净头寸: {len(net_pos.get('60d', []))} 点")
+    
+    # 底背离检测
+    if net_pos and net_pos.get('20d'):
+        pos_series = net_pos['20d']
+        prices = [450 - i * 2 for i in range(len(pos_series))]  # 模拟下跌价格
+        result = fetcher.detect_bottom_divergence(pos_series, prices)
+        print(f"底背离检测: divergence={result['divergence']}, golden_cross={result.get('golden_cross', False)}")
+        print(f"20日斜率: {result['slope_20d']:.4e}, 60日斜率: {result['slope_60d']:.4e}")
+    
+    # 获取卖空指标
+    short = fetcher.get_latest_short_metrics('SPY')
+    if short:
+        print(f"最新卖空占比: {short.get('latest_short_pct', 0):.1f}%")
+        if short.get('latest_short_pct', 0) > 45:
+            print("⚠️ 卖空比例>45%，机构被动吸筹信号!")
+    
+    # 排行榜
+    leaderboard = fetcher.fetch_leaderboard(limit=5)
+    if leaderboard:
+        print(f"\n全市场暗盘 TOP5:")
+        for i, row in enumerate(leaderboard[:5]):
+            ticker = row.get('ticker', 'N/A')
+            pos = row.get('dollar_dp_position', 0)
+            print(f"  #{i+1} {ticker}: ${pos:,.0f}")
 
 
-# ==================== 示例7: DBMF ETF动量监控 ====================
+# ==================== 示例6: DBMF ETF动量监控 ====================
 def example_dbmf_fetcher():
     """DBMF ETF动量监控示例"""
     from data_fetchers import create_dbmf_fetcher
@@ -263,7 +257,6 @@ def example_multi_source_aggregation():
 
 # ==================== 主函数 ====================
 if __name__ == '__main__':
-    import asyncio
     
     print("运行所有示例...\n")
     
@@ -288,17 +281,12 @@ if __name__ == '__main__':
     example_squeezemetrics_fetcher()
     print()
     
-    print("【示例5】ChartExchange卖空比率")
+    print("【示例5】AXLFI暗盘净头寸+做空 (替代ChartExchange+Stockgrid)")
     print("-" * 80)
-    example_chartexchange_fetcher()
+    example_axlfi_fetcher()
     print()
     
-    print("【示例6】Stockgrid暗盘净头寸")
-    print("-" * 80)
-    asyncio.run(example_stockgrid_fetcher())
-    print()
-    
-    print("【示例7】DBMF ETF动量")
+    print("【示例6】DBMF ETF动量")
     print("-" * 80)
     example_dbmf_fetcher()
     print()

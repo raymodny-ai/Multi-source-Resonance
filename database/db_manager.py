@@ -868,6 +868,297 @@ class DatabaseManager:
         )
     
     # ============================================================
+    # G. 网关快照操作 (V2.0)
+    # ============================================================
+
+    def insert_gateway_snapshot(
+        self,
+        snapshot_date: date,
+        pipeline_run_id: str,
+        snapshot_json: str,
+        schema_version: str = "2.0.0",
+        data_quality_flag: str = "NORMAL",
+        resonance_score: int = 0,
+        processing_duration_ms: int = 0,
+        interception_status: str = "pass_through",
+    ) -> bool:
+        """插入网关快照记录 (V2.0)
+
+        存储每日穿过 Layer 2 网关的完整 JSON 信封，供审计和回测使用。
+
+        Args:
+            snapshot_date: 快照日期
+            pipeline_run_id: 流水线运行 ID (UUID)
+            snapshot_json: 完整 GatewayEnvelope JSON 字符串
+            schema_version: Schema 版本号
+            data_quality_flag: 数据质量标志 (NORMAL/DEGRADED/ERROR)
+            resonance_score: 共振得分
+            processing_duration_ms: 处理耗时 (毫秒)
+            interception_status: 拦截状态 (pass_through/degraded/blocked)
+
+        Returns:
+            bool: 插入成功返回 True
+        """
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO gateway_snapshots
+                    (snapshot_date, pipeline_run_id, snapshot_json, schema_version,
+                     data_quality_flag, resonance_score, processing_duration_ms,
+                     interception_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    snapshot_date.isoformat(),
+                    pipeline_run_id,
+                    snapshot_json,
+                    schema_version,
+                    data_quality_flag,
+                    resonance_score,
+                    processing_duration_ms,
+                    interception_status,
+                ))
+
+            logger.debug(f"网关快照插入成功: {snapshot_date} (run_id={pipeline_run_id[:8]}...)")
+            return True
+
+        except Exception as e:
+            logger.error(f"插入网关快照失败: {e}")
+            return False
+
+    def get_gateway_snapshot_by_date(
+        self, snapshot_date: date
+    ) -> Optional[Dict[str, Any]]:
+        """按日期获取网关快照
+
+        Args:
+            snapshot_date: 快照日期
+
+        Returns:
+            字典格式的网关快照，不存在则返回 None
+        """
+        try:
+            cursor = self.connection.execute("""
+                SELECT * FROM gateway_snapshots
+                WHERE snapshot_date = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (snapshot_date.isoformat(),))
+
+            row = cursor.fetchone()
+            result = self._row_to_dict(row)
+
+            if result and result.get('snapshot_json'):
+                try:
+                    result['snapshot_json'] = json.loads(result['snapshot_json'])
+                except json.JSONDecodeError:
+                    pass
+
+            return result
+
+        except Exception as e:
+            logger.error(f"查询网关快照失败 (date={snapshot_date}): {e}")
+            return None
+
+    def get_gateway_snapshot_by_run_id(
+        self, pipeline_run_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """按流水线运行 ID 获取网关快照
+
+        Args:
+            pipeline_run_id: 流水线运行 ID
+
+        Returns:
+            字典格式的网关快照，不存在则返回 None
+        """
+        try:
+            cursor = self.connection.execute("""
+                SELECT * FROM gateway_snapshots
+                WHERE pipeline_run_id = ?
+                LIMIT 1
+            """, (pipeline_run_id,))
+
+            row = cursor.fetchone()
+            result = self._row_to_dict(row)
+
+            if result and result.get('snapshot_json'):
+                try:
+                    result['snapshot_json'] = json.loads(result['snapshot_json'])
+                except json.JSONDecodeError:
+                    pass
+
+            return result
+
+        except Exception as e:
+            logger.error(f"查询网关快照失败 (run_id={pipeline_run_id[:8]}...): {e}")
+            return None
+
+    def get_gateway_snapshot_history(
+        self, days: int = 90
+    ) -> pd.DataFrame:
+        """获取历史网关快照 (用于批量回测)
+
+        Args:
+            days: 回溯天数
+
+        Returns:
+            DataFrame 格式的网关快照历史
+        """
+        try:
+            query = """
+                SELECT * FROM gateway_snapshots
+                WHERE snapshot_date >= date('now', '-' || ? || ' days')
+                ORDER BY snapshot_date DESC
+            """
+
+            df = pd.read_sql_query(query, self.connection, params=(days,))
+            logger.debug(f"获取网关快照历史成功: {len(df)}条记录 ({days}天)")
+            return df
+
+        except Exception as e:
+            logger.error(f"查询网关快照历史失败: {e}")
+            return pd.DataFrame()
+
+    # ============================================================
+    # H. 数据校验审计日志操作 (V2.0)
+    # ============================================================
+
+    def insert_validation_audit_entries(
+        self,
+        snapshot_date: date,
+        pipeline_run_id: str,
+        audit_entries: list,
+        pass_rate_pct: float = 100.0,
+    ) -> bool:
+        """批量插入数据校验审计日志 (V2.0 数据校验防线)
+
+        将 DataValidationPipeline 产生的所有审计条目持久化到不可变日志表。
+        每个条目记录一条校验违规详情，关联到当次 Pipeline 运行。
+
+        Args:
+            snapshot_date: 快照日期
+            pipeline_run_id: 流水线运行 ID (UUID)
+            audit_entries: ValidationAuditEntry 对象列表
+            pass_rate_pct: 当日校验总体通过率 (%)
+
+        Returns:
+            bool: 插入成功返回 True
+        """
+        if not audit_entries:
+            return True  # 无违规，视为成功
+
+        try:
+            with self._get_cursor() as cursor:
+                rows = []
+                for entry in audit_entries:
+                    rows.append((
+                        snapshot_date.isoformat(),
+                        pipeline_run_id,
+                        getattr(entry, 'check_type', 'UNKNOWN'),
+                        getattr(entry, 'severity', 'WARN'),
+                        getattr(entry, 'field_name', ''),
+                        getattr(entry, 'expected_range', ''),
+                        getattr(entry, 'actual_value', ''),
+                        getattr(entry, 'option_type', ''),
+                        getattr(entry, 'strike', 0.0),
+                        getattr(entry, 'expiry', ''),
+                        pass_rate_pct,
+                        getattr(entry, 'details', ''),
+                    ))
+
+                cursor.executemany("""
+                    INSERT INTO validation_audit_log
+                    (snapshot_date, pipeline_run_id, check_type, severity,
+                     field_name, expected_range, actual_value, option_type,
+                     strike, expiry, pass_rate_pct, details)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, rows)
+
+            logger.info(f"审计日志插入成功: {len(rows)} 条 (date={snapshot_date}, run_id={pipeline_run_id[:8]}...)")
+            return True
+
+        except Exception as e:
+            logger.error(f"插入审计日志失败: {e}")
+            return False
+
+    def get_validation_audit_by_date(
+        self, snapshot_date: date
+    ) -> list:
+        """按日期获取校验审计日志
+
+        Args:
+            snapshot_date: 快照日期
+
+        Returns:
+            字典列表格式的审计条目
+        """
+        try:
+            cursor = self.connection.execute("""
+                SELECT * FROM validation_audit_log
+                WHERE snapshot_date = ?
+                ORDER BY created_at DESC
+            """, (snapshot_date.isoformat(),))
+
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
+
+        except Exception as e:
+            logger.error(f"查询审计日志失败 (date={snapshot_date}): {e}")
+            return []
+
+    def get_validation_audit_by_run_id(
+        self, pipeline_run_id: str
+    ) -> list:
+        """按流水线运行 ID 获取校验审计日志
+
+        Args:
+            pipeline_run_id: 流水线运行 ID
+
+        Returns:
+            字典列表格式的审计条目
+        """
+        try:
+            cursor = self.connection.execute("""
+                SELECT * FROM validation_audit_log
+                WHERE pipeline_run_id = ?
+                ORDER BY created_at DESC
+            """, (pipeline_run_id,))
+
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
+
+        except Exception as e:
+            logger.error(f"查询审计日志失败 (run_id={pipeline_run_id[:8]}...): {e}")
+            return []
+
+    def get_recent_pass_rates(
+        self, num_runs: int = 5
+    ) -> list:
+        """获取最近 N 次运行的校验通过率 (用于 95% 熔断判定)
+
+        查询 v_daily_pass_rate 视图，返回最近 num_runs 次不同运行的通过率。
+
+        Args:
+            num_runs: 回溯的运行次数
+
+        Returns:
+            通过率浮点数列表 (0-100)，最近的在末尾
+        """
+        try:
+            cursor = self.connection.execute("""
+                SELECT DISTINCT pipeline_run_id, pass_rate_pct
+                FROM v_daily_pass_rate
+                ORDER BY snapshot_date DESC, pipeline_run_id DESC
+                LIMIT ?
+            """, (num_runs,))
+
+            rows = cursor.fetchall()
+            # 逆序使最近的排末尾 (匹配 historical_pass_rates)
+            rates = [row['pass_rate_pct'] for row in reversed(rows)]
+            return [r for r in rates if r is not None]
+
+        except Exception as e:
+            logger.error(f"查询近期通过率失败: {e}")
+            return []
+
+    # ============================================================
     # F. 数据库维护
     # ============================================================
     
@@ -909,6 +1200,44 @@ class DatabaseManager:
                 error_code="DB_BACKUP_FAILED",
                 details={"backup_path": backup_path, "error": str(e)}
             )
+    
+    def clean_old_backups(self, keep_count: int = 7) -> int:
+        """清理旧备份文件，仅保留最近 N 个
+        
+        Args:
+            keep_count: 保留的最近备份数量 (默认 7)
+            
+        Returns:
+            int: 删除的备份文件数量
+        """
+        try:
+            backup_dir = Path(self.db_path).parent / "backups"
+            if not backup_dir.exists():
+                return 0
+            
+            # 收集所有备份文件
+            backups = sorted(
+                backup_dir.glob("monitoring_backup_*.db"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )
+            
+            # 删除超出保留数量的旧备份
+            removed = 0
+            for old_backup in backups[keep_count:]:
+                try:
+                    old_backup.unlink()
+                    removed += 1
+                    logger.info(f"已删除旧备份: {old_backup.name}")
+                except Exception as del_err:
+                    logger.warning(f"删除旧备份失败 {old_backup.name}: {del_err}")
+            
+            if removed > 0:
+                logger.info(f"备份清理完成: 删除 {removed} 个旧备份, 保留 {min(keep_count, len(backups))} 个")
+            return removed
+        except Exception as e:
+            logger.error(f"备份清理失败: {e}")
+            return 0
     
     def vacuum_database(self) -> bool:
         """清理数据库碎片(VACUUM)

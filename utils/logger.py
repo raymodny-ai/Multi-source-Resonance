@@ -6,10 +6,11 @@
 - 同时输出到控制台和文件
 - 按日期分割日志文件
 - 错误日志单独记录
-- 结构化日志格式
+- 结构化日志格式 (OpenCLAW Web UI 风格)
+- StructuredFormatter: 适合 Web 控制台终端的对齐列格式
 
 使用示例:
-    from utils.logger import getLogger
+    from utils.logger import getLogger, StructuredFormatter
     
     logger = getLogger('data_fetchers')
     logger.info('开始获取数据...')
@@ -28,9 +29,13 @@ from typing import Optional
 LOG_DIR = Path('./logs')
 LOG_DIR.mkdir(exist_ok=True)
 
-# 日志格式
+# 日志格式 (文件)
 LOG_FORMAT = '[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s'
 DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
+
+# OpenCLAW Web UI 结构化格式 (控制台)
+STRUCTURED_FORMAT = '[%(asctime)s] [%(levelname)-7s] [%(source)-8s] %(message)s'
+STRUCTURED_DATE_FORMAT = '%H:%M:%S'
 
 # 日志级别映射
 LOG_LEVELS = {
@@ -40,6 +45,63 @@ LOG_LEVELS = {
     'ERROR': logging.ERROR,
     'CRITICAL': logging.CRITICAL,
 }
+
+# 级别颜色/图标标记 (OpenCLAW 风格)
+LEVEL_MARKERS = {
+    'DEBUG':    '·',
+    'INFO':     ' ',  # 普通信息无标记
+    'WARNING':  '⚠',
+    'ERROR':    '✗',
+    'CRITICAL': '‼',
+}
+
+
+class StructuredFormatter(logging.Formatter):
+    """OpenCLAW Web UI 风格的结构化日志格式化器
+    
+    输出对齐列格式，适合在 Web 控制台终端中渲染：
+      [14:30:00] [  INFO  ] [GEX/DIX ] 消息内容
+      [14:30:01] [  WARN  ] [VIX     ] ⚠ 警告消息
+      [14:30:02] [ ERROR  ] [AXLFI   ] ✗ 错误消息
+    
+    使用方式:
+        handler = logging.StreamHandler()
+        handler.setFormatter(StructuredFormatter())
+        logger.addHandler(handler)
+    """
+
+    LEVEL_WIDTH = 7     # "  INFO  "
+    SOURCE_WIDTH = 8    # "GEX/DIX "
+
+    def __init__(self, fmt: Optional[str] = None, datefmt: Optional[str] = None):
+        super().__init__(
+            fmt=fmt or STRUCTURED_FORMAT,
+            datefmt=datefmt or STRUCTURED_DATE_FORMAT,
+        )
+
+    def format(self, record: logging.LogRecord) -> str:
+        # 注入 source 字段 (如果 record 没有，使用 name 截断)
+        source = getattr(record, 'source', None)
+        if source is None:
+            source = record.name[:self.SOURCE_WIDTH]
+        record.source = source.ljust(self.SOURCE_WIDTH)[:self.SOURCE_WIDTH]
+
+        # 添加级别标记
+        marker = LEVEL_MARKERS.get(record.levelname, '')
+        original_msg = record.getMessage()
+        if marker.strip():
+            record._original_msg = original_msg
+            record.args = ()  # 清除 args 避免二次格式化
+            record.msg = f"{marker} {original_msg}"
+
+        return super().format(record)
+
+    def formatTime(self, record: logging.LogRecord, datefmt: Optional[str] = None) -> str:
+        """使用短时间格式 HH:MM:SS"""
+        ct = datetime.fromtimestamp(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime(STRUCTURED_DATE_FORMAT)
 
 
 class LoggerManager:
@@ -64,21 +126,23 @@ class LoggerManager:
         self._initialized = True
         self.default_level = logging.INFO
     
-    def get_logger(self, name: str, level: Optional[str] = None) -> logging.Logger:
+    def get_logger(self, name: str, level: Optional[str] = None, structured: bool = False) -> logging.Logger:
         """获取或创建logger实例
         
         Args:
             name: logger名称，通常为模块名
             level: 日志级别字符串，默认为配置的级别
+            structured: 是否使用 OpenCLAW 结构化格式 (控制台输出)
             
         Returns:
             logging.Logger: 配置好的logger实例
         """
-        if name in self._loggers:
-            return self._loggers[name]
+        cache_key = f"{name}__{'structured' if structured else 'plain'}"
+        if cache_key in self._loggers:
+            return self._loggers[cache_key]
         
         # 创建logger
-        logger = logging.getLogger(name)
+        logger = logging.getLogger(cache_key)
         
         # 设置日志级别
         log_level = LOG_LEVELS.get(
@@ -89,16 +153,21 @@ class LoggerManager:
         
         # 避免重复添加handler
         if logger.handlers:
-            self._loggers[name] = logger
+            self._loggers[cache_key] = logger
             return logger
         
-        # 创建formatter
-        formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
+        # 创建formatter — 根据 structured 模式选择
+        if structured:
+            console_formatter = StructuredFormatter()
+        else:
+            console_formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
+        
+        file_formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
         
         # 控制台handler
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(log_level)
-        console_handler.setFormatter(formatter)
+        console_handler.setFormatter(console_formatter)
         logger.addHandler(console_handler)
         
         # 文件handler - 所有日志
@@ -111,7 +180,7 @@ class LoggerManager:
             encoding='utf-8'
         )
         file_handler.setLevel(log_level)
-        file_handler.setFormatter(formatter)
+        file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
         
         # 文件handler - 仅错误日志
@@ -123,10 +192,10 @@ class LoggerManager:
             encoding='utf-8'
         )
         error_handler.setLevel(logging.ERROR)
-        error_handler.setFormatter(formatter)
+        error_handler.setFormatter(file_formatter)
         logger.addHandler(error_handler)
         
-        self._loggers[name] = logger
+        self._loggers[cache_key] = logger
         return logger
     
     @staticmethod
@@ -165,12 +234,13 @@ class LoggerManager:
 _logger_manager = LoggerManager()
 
 
-def getLogger(name: str, level: Optional[str] = None) -> logging.Logger:
+def getLogger(name: str, level: Optional[str] = None, structured: bool = False) -> logging.Logger:
     """获取logger实例的便捷函数
     
     Args:
         name: logger名称，通常为模块名
         level: 日志级别字符串，可选
+        structured: 是否使用 OpenCLAW 结构化格式 (控制台)  
         
     Returns:
         logging.Logger: 配置好的logger实例
@@ -179,8 +249,12 @@ def getLogger(name: str, level: Optional[str] = None) -> logging.Logger:
         >>> logger = getLogger('data_fetchers')
         >>> logger.info('系统启动')
         [2026-06-09 10:30:00] [INFO] [data_fetchers] 系统启动
+        
+        >>> cli = getLogger('collect', structured=True)
+        >>> cli.info('开始采集')
+        [10:30:00] [  INFO  ] [collect ] 开始采集
     """
-    return _logger_manager.get_logger(name, level)
+    return _logger_manager.get_logger(name, level, structured=structured)
 
 
 def setLogLevel(level: str):

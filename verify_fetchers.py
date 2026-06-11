@@ -227,95 +227,72 @@ def test_squeezemetrics_fetcher() -> bool:
         return False
 
 
-def test_chartexchange_fetcher() -> bool:
-    """测试ChartExchangeFetcher功能"""
-    print("\n--- 测试 ChartExchangeFetcher ---")
+def test_axlfi_fetcher() -> bool:
+    """测试 AxlfiFetcher 功能 (替代已下线的 ChartExchange + Stockgrid)"""
+    print("\n--- 测试 AxlfiFetcher ---")
     
     try:
-        from data_fetchers.chartexchange_fetcher import ChartExchangeFetcher
+        from data_fetchers.axlfi_fetcher import AxlfiFetcher
         
-        fetcher = ChartExchangeFetcher(mock_mode=True)
+        fetcher = AxlfiFetcher(mock_mode=True)
         
-        # 测试fetch_short_volume_data
-        raw_data = fetcher.fetch_short_volume_data('SPY')
+        # 测试 fetch_symbol_data
+        raw_data = fetcher.fetch_symbol_data('SPY', window=252)
         if raw_data is None:
-            print("❌ fetch_short_volume_data返回None")
-            return False
-        
-        # 测试calculate_off_exchange_short_ratio
-        ratio = fetcher.calculate_off_exchange_short_ratio(raw_data)
-        if ratio is None:
-            print("❌ calculate_off_exchange_short_ratio返回None")
-            return False
-        
-        # 测试check_consecutive_days
-        history = [
-            {'date': '2026-06-07', 'short_ratio': 46.5},
-            {'date': '2026-06-08', 'short_ratio': 47.2},
-        ]
-        result = fetcher.check_consecutive_days(history, threshold=45.0, consecutive_days=2)
-        if not result:
-            print("❌ check_consecutive_days返回False（预期True）")
-            return False
-        
-        print(f"✅ fetch_short_volume_data: 返回{len(raw_data)}个字段")
-        print(f"✅ calculate_off_exchange_short_ratio: {ratio:.2f}%")
-        print(f"✅ check_consecutive_days: {result}")
-        return True
-        
-    except Exception as e:
-        print(f"❌ ChartExchangeFetcher测试失败: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-def test_stockgrid_fetcher() -> bool:
-    """测试StockgridFetcher功能"""
-    print("\n--- 测试 StockgridFetcher ---")
-    
-    try:
-        from data_fetchers.stockgrid_fetcher import StockgridFetcher
-        
-        fetcher = StockgridFetcher(mock_mode=True)
-        
-        # 由于scrape_net_position_history是异步方法，这里只测试Mock数据生成
-        import asyncio
-        
-        async def test_async():
-            data = await fetcher.scrape_net_position_history('SPY', [20, 60, 120])
-            return data
-        
-        data = asyncio.run(test_async())
-        if data is None:
-            print("❌ scrape_net_position_history返回None")
+            print("❌ fetch_symbol_data返回None")
             return False
         
         # 验证数据结构
-        required_periods = ['20d', '60d', '120d']
-        missing_periods = [p for p in required_periods if p not in data]
-        if missing_periods:
-            print(f"❌ 数据缺少周期: {missing_periods}")
+        for key in ['dates', 'dollar_dp_position', 'short_volume_pct', 'close']:
+            if key not in raw_data:
+                print(f"❌ 缺少字段: {key}")
+                return False
+        
+        # 测试 get_net_position_series
+        net_pos = fetcher.get_net_position_series('SPY', [20, 60])
+        if net_pos is None or '20d' not in net_pos:
+            print("❌ get_net_position_series返回None")
             return False
         
-        # 测试detect_bottom_divergence
-        net_pos = data['20d']
-        prices = [450 - i * 2 for i in range(len(net_pos))]  # 模拟价格下跌
-        
-        divergence_result = fetcher.detect_bottom_divergence(net_pos, prices)
+        # 测试 detect_bottom_divergence
+        pos_series = net_pos['20d']
+        prices = [450 - i * 2 for i in range(len(pos_series))]
+        divergence_result = fetcher.detect_bottom_divergence(pos_series, prices)
         if 'divergence' not in divergence_result:
             print("❌ detect_bottom_divergence返回数据结构不正确")
             return False
         
-        print(f"✅ scrape_net_position_history: 20d={len(data['20d'])}个点, 60d={len(data['60d'])}个点, 120d={len(data['120d'])}个点")
-        print(f"✅ detect_bottom_divergence: divergence={divergence_result['divergence']}, slope={divergence_result['slope_20d']:.4f}")
+        # 测试 get_latest_short_metrics
+        short_metrics = fetcher.get_latest_short_metrics('SPY')
+        if 'latest_short_pct' not in short_metrics:
+            print("❌ get_latest_short_metrics返回数据结构不正确")
+            return False
+        
+        print(f"✅ fetch_symbol_data: {len(raw_data.get('dates', []))} 天数据")
+        print(f"✅ get_net_position_series: 20d={len(net_pos['20d'])}点, 60d={len(net_pos['60d'])}点")
+        print(f"✅ detect_bottom_divergence: divergence={divergence_result['divergence']}")
+        print(f"✅ get_latest_short_metrics: short_pct={short_metrics['latest_short_pct']:.1f}%")
         return True
         
     except Exception as e:
-        print(f"❌ StockgridFetcher测试失败: {str(e)}")
+        print(f"❌ AxlfiFetcher测试失败: {str(e)}")
         import traceback
         traceback.print_exc()
         return False
+
+
+def test_chartexchange_fetcher() -> bool:
+    """ChartExchange 已下线，由 yfinance/FINRA + AXLFI 替代"""
+    print("\n--- ChartExchangeFetcher (已弃用) ---")
+    print("✅ ChartExchange 已迁移至 yfinance(做空) + AXLFI(暗盘)，无需测试")
+    return True
+
+
+def test_stockgrid_fetcher() -> bool:
+    """Stockgrid 已下线，由 AXLFI 公开 API 替代"""
+    print("\n--- StockgridFetcher (已弃用, 由 AXLFI 替代) ---")
+    print("✅ Stockgrid.io 已下线 (重定向至 axlfi.com)，数据链路已迁移至 AxlfiFetcher")
+    return True
 
 
 def test_dbmf_fetcher() -> bool:

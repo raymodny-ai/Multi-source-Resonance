@@ -67,3 +67,14 @@ database/monitoring.db-wal
 wiki/
 __pycache__/
 *.pyc
+
+# 部署
+frontend/dist/
+frontend/node_modules/
+deploy/ssl/
+
+# 运行时临时文件
+test_reports/
+*.png
+data/signal_state.json
+.qoder/

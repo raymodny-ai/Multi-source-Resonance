@@ -13,6 +13,7 @@
 """
 
 from typing import Dict, List, Optional
+import numpy as np
 from utils.logger import getLogger
 from config.settings import Config
 
@@ -400,6 +401,65 @@ class DarkPoolVerifier:
             return "MODERATE"
         else:
             return "WEAK"
+
+    # ═══════════════════════════════════════════
+    # V2.0 新增方法
+    # ═══════════════════════════════════════════
+
+    @staticmethod
+    def calculate_dix_percentile(
+        dix_value: float,
+        dix_historical: List[float],
+    ) -> float:
+        """计算当前 DIX 在历史数据中的百分位排名 (V2.0)
+
+        Args:
+            dix_value: 当前 DIX 值 (0-100)
+            dix_historical: 历史 DIX 值列表
+
+        Returns:
+            float: 百分位 (0-100)，历史数据不足时返回 50.0
+        """
+        if not dix_historical or len(dix_historical) < 10:
+            return 50.0
+        arr = np.array(dix_historical, dtype=float)
+        return float(np.sum(arr <= dix_value) / len(arr) * 100)
+
+    @staticmethod
+    def classify_accumulation_regime(
+        dix_value: float,
+        dix_percentile: float,
+        aggregated_signal: bool,
+        dbmf_recovery: bool,
+    ) -> str:
+        """判定吸筹/派发强度分类 (V2.0)
+
+        分类逻辑:
+        - Aggressive Accumulation: DIX > 50 AND 百分位 > 80 AND 聚合信号 AND DBMF 收复
+        - Moderate Accumulation: DIX > 45 AND 百分位 > 60 AND 聚合信号
+        - Neutral: 无明显信号
+        - Moderate Distribution: DIX < 45 AND 百分位 < 40
+        - Aggressive Distribution: DIX < 40 AND 百分位 < 20
+
+        Args:
+            dix_value: 当前 DIX 值
+            dix_percentile: DIX 历史百分位
+            aggregated_signal: 三选二聚合信号
+            dbmf_recovery: DBMF 均线收复标志
+
+        Returns:
+            str: 吸筹/派发分类
+        """
+        if dix_value > 50 and dix_percentile > 80 and aggregated_signal and dbmf_recovery:
+            return "Aggressive Accumulation"
+        elif dix_value > 45 and dix_percentile > 60 and aggregated_signal:
+            return "Moderate Accumulation"
+        elif dix_value < 40 and dix_percentile < 20:
+            return "Aggressive Distribution"
+        elif dix_value < 45 and dix_percentile < 40:
+            return "Moderate Distribution"
+        else:
+            return "Neutral"
 
 
 # 便捷函数

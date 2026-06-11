@@ -1,0 +1,175 @@
+# =============================================================================
+# 多源共振监控系统 - Docker Compose 编排
+# =============================================================================
+# 使用方式:
+#   开发模式: docker compose up app-dev
+#   生产模式: docker compose up -d app
+#   仅数据库: docker compose up db
+#   全栈部署: docker compose --profile full up -d
+# =============================================================================
+
+version: "3.9"
+
+services:
+  # ────────────────────────────────────────────────────────────────
+  # 生产模式: 单容器部署 (后端 + 前端构建产物)
+  # ────────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: multi-resonance:latest
+    container_name: multi-resonance
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8524}:8524"
+    environment:
+      - TZ=America/New_York
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATABASE_PATH=/app/data/monitoring.db
+      # API Keys (从 .env 文件注入)
+      - TRADIER_API_KEY=${TRADIER_API_KEY:-}
+      - TRADIER_ACCOUNT_ID=${TRADIER_ACCOUNT_ID:-}
+      - TRADIER_SANDBOX_MODE=${TRADIER_SANDBOX_MODE:-false}
+      - TRADIER_SANDBOX_TOKEN=${TRADIER_SANDBOX_TOKEN:-}
+      - CCDATA_API_KEY=${CCDATA_API_KEY:-}
+      - COINGLASS_API_KEY=${COINGLASS_API_KEY:-}
+      - SQUEEZEMETRICS_API_KEY=${SQUEEZEMETRICS_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - SMTP_SERVER=${SMTP_SERVER:-}
+      - SMTP_PORT=${SMTP_PORT:-}
+      - EMAIL_SENDER=${EMAIL_SENDER:-}
+      - EMAIL_PASSWORD=${EMAIL_PASSWORD:-}
+      - EMAIL_RECIPIENTS=${EMAIL_RECIPIENTS:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - PIPELINE_OUTPUT_DIR=/app/reports
+    volumes:
+      # 持久化数据目录
+      - resonance_data:/app/data
+      - resonance_logs:/app/logs
+      - resonance_reports:/app/reports
+      # 开发时挂载代码目录 (生产注释掉)
+      # - .:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8524/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - resonance_net
+
+  # ────────────────────────────────────────────────────────────────
+  # 开发模式: 热重载 (挂载源码 + 单独启动前端 dev server)
+  # ────────────────────────────────────────────────────────────────
+  app-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: multi-resonance:dev
+    container_name: multi-resonance-dev
+    restart: unless-stopped
+    ports:
+      - "8524:8524"
+    environment:
+      - TZ=America/New_York
+      - LOG_LEVEL=DEBUG
+      - DATABASE_PATH=/app/data/monitoring.db
+    volumes:
+      # 实时挂载代码 (热重载需配合 uvicorn --reload)
+      - .:/app
+      - resonance_data_dev:/app/data
+      - resonance_logs_dev:/app/logs
+    command: uvicorn api_server:app --host 0.0.0.0 --port 8524 --reload
+    networks:
+      - resonance_net
+    profiles:
+      - dev
+
+  # ────────────────────────────────────────────────────────────────
+  # Nginx 反向代理 (可选, 生产推荐)
+  # ────────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: multi-resonance-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - app
+    networks:
+      - resonance_net
+    profiles:
+      - full
+
+  # ────────────────────────────────────────────────────────────────
+  # Prometheus 指标采集 (可选)
+  # ────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: multi-resonance-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - resonance_net
+    profiles:
+      - monitoring
+
+  # Grafana 可视化 (可选)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: multi-resonance-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASS:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - resonance_net
+    profiles:
+      - monitoring
+
+# ────────────────────────────────────────────────────────────────
+# 持久化卷
+# ────────────────────────────────────────────────────────────────
+volumes:
+  resonance_data:
+    name: multi-resonance-data
+  resonance_logs:
+    name: multi-resonance-logs
+  resonance_reports:
+    name: multi-resonance-reports
+  resonance_data_dev:
+    name: multi-resonance-data-dev
+  resonance_logs_dev:
+    name: multi-resonance-logs-dev
+  prometheus_data:
+    name: multi-resonance-prometheus-data
+  grafana_data:
+    name: multi-resonance-grafana-data
+
+# ────────────────────────────────────────────────────────────────
+# 网络
+# ────────────────────────────────────────────────────────────────
+networks:
+  resonance_net:
+    name: multi-resonance-net
+    driver: bridge

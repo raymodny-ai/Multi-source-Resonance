@@ -1,0 +1,223 @@
+# **工程级产品需求文档 (PRD)：Multi-source Resonance V2.0 三层解耦流水线架构 (盘后分析版)**
+
+## **架构升级总纲与系统重构愿景**
+
+在当前复杂的量化金融工程领域，将全量市场数据与先进的自然语言处理模型结合已经成为获取超额收益（Alpha）的前沿探索方向。然而，在“Multi-source-Resonance”项目的早期开发与迭代过程中，系统架构暴露出一个基础性且致命的缺陷：大语言模型（LLM）被过度暴露于底层数学计算与海量原始数据快照之中 1。由于大语言模型的底层机制是基于概率的自回归文本生成，而非确定性的冯·诺依曼架构下的算术逻辑单元（ALU），强制要求 LLM 处理数以百万计的浮点数、执行期权定价公式或计算复杂的希腊字母敞口，不可避免地会导致严重的“数学幻觉”（Mathematical Hallucinations） 1。此外，将庞大的期权链矩阵或暗池交易日志直接作为 Prompt 传输给 LLM，会引发灾难性的 API Token 消耗，使得系统在每日盘后的大数据复盘中效率低下且成本高昂 1。  
+为了彻底根除这一系统性瓶颈，本工程级产品需求文档（PRD）明确提出并详细规划了 Multi-source Resonance V2.0 版本的核心解耦方案。该方案的绝对核心在于建立一个严格隔离的“三层流水线架构”（Three-Layer Pipeline Architecture）。该架构在物理与逻辑层面上，将确定性的数学运算与概率性的逻辑推理彻底剥离 1。第一层负责承担所有繁重的底层数据提炼与纯粹的数学向量运算；第二层作为至关重要的上下文网关，利用轻量级的 JSON 序列化技术构建数据纽带；第三层则完全释放 LLM 的自然语言理解与宏观金融逻辑推理能力，使其在零计算负担的前提下，专注于生成高质量的盘后策略简报与次日市场情绪解读 1。通过这种极致的职责划分，项目将实现计算准确性、运行稳定度与大模型调用成本的全面优化。
+
+## **第一层：数据提炼与数学运算层（硬编码与纯本地执行）**
+
+第一层架构是整个 Multi-source-Resonance 系统的“量化引擎”与绝对的数据基石。其核心设计理念是：任何涉及公式、求和、微积分或矩阵变换的操作，绝对不允许跨越此层边界。该层必须在纯本地或高度优化的硬编码环境中执行，确保对盘后海量金融数据快照的高效批量与无损处理 1。
+
+### **盘后数据源的接入与底层处理逻辑**
+
+该层首先需要处理来自多元渠道的每日收盘数据，特别是项目定义的两个核心数据源：TDS（交易数据/Tick Data Snapshots）与 SPR（系统性持仓报告/Systematic Positioning Reports 或暗池流动性数据） 1。  
+TDS 数据包含了全市场的 Level 3 订单簿日终快照、全天逐笔成交聚合记录以及跨越所有执行价和到期日的期权链（Options Chain）结算数据。由于期权市场的多维特性，每个标的资产在收盘时存在数以万计的活跃合约。另一方面，SPR 数据源则专注于场外交易（OTC）和暗池（Dark Pools）全天流动性的追踪与汇总 1。暗池交易通常代表了机构资金的隐秘动向，其流动性求和对于判断市场真实的买卖意愿至关重要。  
+为了有效摄取这些历史数据库快照，第一层架构将采用基于本地文件系统（如 Parquet 或 HDF5）的大数据批处理框架（如 Pandas 或 Polars）。原始数据在盘后进入系统后，将统一被清洗、对齐并转换为高密度的多维数组格式，为后续的向量化计算做好内存层面的准备。这一过程对 LLM 是完全黑盒的，LLM 绝对不会接触到这些未加工的底层字节 1。
+
+### **核心向量化数学运算的硬编码实现**
+
+在数据准备就绪后，系统将调用硬编码的数学库执行复杂的金融衍生品计算。所有运算必须是向量化的（Vectorized），系统将深度集成如 py\_vollib\_vectorized 这类基于 NumPy、PyTorch 或 JAX 后端的加速计算包，以实现对全量期权链的批量计算。
+
+#### **Black-Scholes 模型与希腊字母的矩阵推演**
+
+期权定价的基石是 Black-Scholes-Merton 模型。第一层将利用本地 CPU 或 GPU 算力，对输入的当日所有期权合约进行隐含波动率（Implied Volatility）的快速反演和希腊字母计算 2。标准欧式看涨期权的价格 ![][image1] 的向量化求解过程如下：  
+![][image2]  
+其中核心参数的中间变量矩阵计算为：  
+![][image3]  
+![][image4]  
+通过对这些偏微分方程的批量计算，系统能够获取每个合约在收盘时的 Delta (![][image5])、Gamma (![][image6])、Vega (![][image7]) 等关键敞口指标。借助于硬编码的底层优化，几百万个浮点数的计算可在数秒至数十秒的批处理时间内高效完成。
+
+#### **Gamma 暴露 (GEX) 与做市商对冲流向分析**
+
+在获取了基础的希腊字母后，第一层必须执行更高级的市场微观结构计算，其中最关键的是 Gamma 暴露（Gamma Exposure, 简称 GEX）的聚合 1。GEX 衡量了期权做市商为了维持其投资组合的 Delta 中性，在标的资产价格变动 1% 时所需买卖的股票美元价值 4。  
+根据 Squeezemetrics 和 SpotGamma 等量化机构的普遍推导逻辑，单一合约的 Gamma 暴露计算公式为：  
+![][image8]  
+或者转换为股票数量的影响力公式：  
+![][image9]  
+其中看涨期权 ![][image10]，看跌期权 ![][image11] 6。  
+本地运算层需要遍历所有活跃到期日的期权合约，按收盘时的未平仓量加权计算每个行权价的 Gamma，并进行全网求和以生成总净 GEX（Net GEX）曲线 9。此外，系统还需要计算出“Gamma 翻转点”（Gamma Flip），即净 GEX 由正转负的关键行权价位 5。
+
+| GEX 状态判定 | 市场微观结构特征 | 做市商次日潜在机械性对冲行为 |
+| :---- | :---- | :---- |
+| **高正 Gamma 区间** | 市场波动率受到压制 | 标的下跌时买入，上涨时卖出，提供市场流动性，形成阻力与支撑 5 |
+| **深负 Gamma 区间** | 市场波动率被剧烈放大 | 标的下跌时卖出，上涨时买入，抽取市场流动性，引发趋势共振放大 5 |
+
+除 GEX 外，该层还需同步计算 Vanna 敞口 (VEX) 和 Charm 敞口 (CEX) 10。Vanna（![][image12]）衡量隐含波动率变化对做市商 Delta 的影响，高 VEX 集中区意味着波动率骤降（IV Crush）将触发大规模的机械性买盘或卖盘 10。
+
+#### **暗池流动性求和与系统性持仓聚合**
+
+并行于期权矩阵计算，第一层架构还将处理 SPR 数据源中全天的暗池成交记录。系统通过对大宗交易的成交量、价格与全市场成交量进行比例加权，构建类似于 DIX（Dark Index）的暗池指标 11。这一计算旨在剥离零售交易的噪音，量化机构资金的真实净积累（Accumulation）或净派发（Distribution）状态 11。
+
+### **极端降维算法与共振信号提取**
+
+第一层架构的最终职责是执行极端的“降维打击” 1。在完成上述所有批处理张量运算后，绝对不能将海量的结果直接抛给 LLM。因此，该层必须运行一套综合的多因子加权聚合算法，将百万级的微观数据降维为几个核心的“共振信号”或宏观关键指标 1。  
+系统会设立一系列阈值与评分卡。例如，如果当日收盘净 GEX 处于历史后 10% 的极度负值区间，且当前现价跌破了 Gamma Flip 点，同时暗池 DIX 显示出极端的派发状态，降维算法会将这些向量对齐，综合判定为一个统一的输出参数。百万级别的数据最终被浓缩为极具信息密度的键值对，例如：
+
+* 多源共振强度得分 (Multi-source Resonance Score): 85（百分制，表明次日下跌趋势确认度极高） 1  
+* 核心支撑位 (Core Support Level): 4950（基于最大看跌期权未平仓量墙 Put Wall 确立） 1  
+* 市场状态 (Market Regime): 深负 Gamma 区间，次日存在流动性黑洞风险 1
+
+这一降维过程彻底隔绝了数据的复杂性，为下一层的网关传输准备了最纯粹的量化事实。
+
+## **数据校验与金融常识审查模块（防线拦截）**
+
+在第一层（数学运算层）与第二层（上下文网关层）之间，系统必须部署一个专用的数据校验模块（Data Validation Module）。这是防止“垃圾进，垃圾出”（Garbage In, Garbage Out）以及避免引发大语言模型逻辑推理错误的最后一道刚性防线。该模块采用“双层校验框架结合金融常识检查”的机制进行严密过滤。
+
+### **双层校验技术栈与结构化验证**
+
+在 Python 数据处理流水线中，针对不同形态的数据，系统将组合使用轻量级且高性能的开源库以保障数据质量：
+
+* **Pandera (针对第一层 DataFrame)：** 第一层处理完毕的是海量的期权链和暗池降维矩阵。系统利用 Pandera 对这些矩阵执行严格的列类型约束和统计级检查（如强制期权价格不能为负数、未平仓量必须为正整数等），非常适合在批量生产环境中确保数据处理管道的鲁棒性。  
+* **Pydantic (针对第二层 JSON)：** 在数据被彻底降维并准备打包成 JSON 发送给 LLM 之前，利用 Pydantic 对第二层的上下文网关层执行严格的 Schema 序列化校验，确保诸如多源共振得分、核心支撑位等字段的类型和范围绝对符合预设契约。
+
+### **金融数据常识检查 (Sanity Checks)**
+
+除了检查数据类型的合规性，校验模块的核心是加入基于金融学定理的硬性边界（No-arbitrage Bounds）检查。如果第一层的 Black-Scholes 运算由于源数据残缺而输出了违背金融常识的结果，校验模块应立即熔断或标记异常：
+
+* **希腊字母 (Greeks) 边界校验：** 强制检查计算出的期权 Delta 是否合规。标准看涨期权的 Delta 必须在 0 到 1 之间，看跌期权的 Delta 必须在 \-1 到 0 之间。同时，深度价内的 Delta 应接近极限值，深度价外的 Delta 应接近 0。  
+* **平价组合逻辑校验：** 自动抽样检查同一行权价下，对称的看涨与看跌期权组合的综合 Delta 是否接近于 0。  
+* **无套利定价边界：** 欧式期权价格必须严格处于合理的无套利理论边界内（例如看涨期权价格必须大于或等于标的资产现价减去行权价的现值）。若模型输出的价格超出此区间，说明输入的底层数据或波动率参数存在严重异常。
+
+### **微观异常检测与审计追踪**
+
+* **微观结构异常检测：** 利用隔离森林（Isolation Forest）等无监督算法监控隐含波动率曲面与 GEX 的历史分布。如果某日盘后 GEX 出现历史上从未见过的跳跃式极值（例如 10 个标准差以外的数据），模块需标记为“高置信度异常”并主动降级，防止 LLM 根据错误数据得出市场即将崩溃的“严重幻觉”。  
+* **不可变审计日志 (Audit Logging)：** 所有因 Pandera 或 Pydantic 校验失败而被剔除、修正的数据记录，必须被持久化存储。如果当日第一层的常规检查通过率低于 95%（意味着今日交易所快照数据极其不健康），网关层将直接生成一个容错 JSON（如 {"status": "Validation Failed", "error\_type": "Greeks Bounds Violation"}）发送给 LLM。这不仅优雅地实现了数据熔断降级，也保证了在每一次管道故障时，系统都能提供充足的历史状态线索供量化团队复盘调优。
+
+## **第二层：上下文网关层（JSON 序列化纽带与拦截器）**
+
+上下文网关层是整个“Multi-source Resonance”系统解耦机制的绝对核心枢纽 1。它不负责执行任何复杂的数学计算，也不负责撰写任何人类可读的分析报告。它的存在意义在于充当一个坚不可摧的数据契约验证者与轻量级的传输层，精准接收盘后第一层的降维结果，并将其打包转化为大语言模型能够完美解析的超结构化载体。
+
+### **JSON 字典的结构化封装与契约定义**
+
+在接收到第一层传来的降维变量后，网关层会利用序列化库将其打包成一个体积极小、高度结构化的 JSON 字典 1。大语言模型在预训练阶段摄取了海量的结构化数据，使得它们对 JSON 格式的解析能力极其精准。通过 JSON 键值对，LLM 能够毫无歧义地将特定的数值与其金融含义绑定在一起。  
+网关层必须遵循严格的 Schema 契约。一个标准的序列化 JSON 字典结构示例如下：
+
+| JSON 层级结构 | 键名 (Key) | 数据类型 | 载荷示例与业务含义 |
+| :---- | :---- | :---- | :---- |
+| **基础元数据** | timestamp | String | "2026-06-11T16:30:00Z"，盘后时间戳锚点 |
+| **基础元数据** | underlying\_asset | String | "SPX"，标的资产代码 |
+| **共振评分模块** | resonance\_intensity\_score | Integer | 85，多源共振强度得分 1 |
+| **共振评分模块** | resonance\_signal\_state | String | "Extreme Confluence"，共振信号极强 1 |
+| **期权微观结构** | net\_gamma\_regime | String | "Negative Gamma"，负 Gamma 区间 1 |
+| **期权微观结构** | gamma\_flip\_level | Float | 5050.0，做市商敞口翻转点 5 |
+| **关键防线判定** | core\_support\_wall | Float | 4950.0，核心支撑位 1 |
+| **关键防线判定** | core\_resistance\_wall | Float | 5125.0，核心阻力位 5 |
+| **暗池流动性状态** | dark\_pool\_dix\_status | String | "Aggressive Accumulation"，激进吸筹 |
+| **波动率动态** | vanna\_exposure\_bias | String | "High IV Crush Buying Risk"，高 VEX 带来的买盘风险 10 |
+
+### **消除幻觉风险与极致降低 Token 消耗**
+
+上下文网关层带来的最显著优势体现在两个核心痛点的解决上 1。  
+首先是**API Token 消耗的几何级下降与防限流**。在传统的错误架构中，如果将完整的期权链矩阵文本发送给 LLM，不仅极其昂贵，而且很快会触及大模型的上下文窗口极限。通过网关层将庞大的数据集缩减为一个仅包含 10 到 15 个关键维度的 JSON 字典，Token 消耗量被压缩至极低的水平，极大地节约了每日盘后批量生成分析报告的 API 成本 1。  
+其次是**从根本上消除了“数学幻觉”**。由于 LLM 接收到的已经是确定的事实状态（例如直接被告知“收盘跌破关键 Gamma 墙”），它不再需要自己在脑海中去对比现价与百万个行权价之间的关系。网关层通过结构化字段，强行剥夺了 LLM 犯计算错误的机会 1。LLM 被降维成了纯粹的逻辑翻译器，只能依赖注入的精确变量进行推演。
+
+### **拦截器机制与数据异常清洗**
+
+作为拦截器，第二层还肩负着数据清洗与越界保护的职责。由于第一层与第二层之间已经部署了上文提到的数据校验模块，此时拦截器只需要捕获校验模块抛出的熔断标识或底层系统级异常（如 NaN）。一旦触发，网关层将直接终止向第三层的推理请求，并生成标准的容错 JSON，彻底防止 LLM 基于错误的数学前置条件进行瞎编乱造。
+
+## **第三层：大语言模型推理层（Prompt 注入与生成）**
+
+经历了第一层的数据提炼与第二层的结构化封装后，系统流转至最终的大语言模型推理层。在这一层级中，LLM 完全不需要知道 Black-Scholes 方程的具体计算细节 1。它的唯一任务，就是接收预设的身份（Persona）并解析网关传来的 JSON 状态变量，凭借其庞大预训练语料库中蕴含的金融逻辑与宏观知识，推理出次日市场参与者可能的博弈路径。
+
+### **身份预设 (Persona) 与 Prompt 工程注入**
+
+为了确保生成的策略简报具备极高的专业度与机构级水准，推理层必须通过严苛的系统级提示词（System Prompt）对 LLM 进行身份约束 1。  
+系统提示词的架构设计必须明确 LLM 的角色边界与行为准则。例如：  
+*“你现在是一位拥有 20 年华尔街顶尖对冲基金经验的宏观衍生品策略师。你不需要计算任何数据，你必须绝对信任我提供的 JSON 盘后状态输入。你的职责是深度解读这些变量背后的做市商对冲路径（Market Maker Hedging Paths）和机构流动性博弈，并以专业、冷静、客观的语调输出针对次日交易的高度结构化的策略简报。”*  
+随后，系统通过用户提示词（User Prompt）通道，将第二层生成的 JSON 字典无缝注入。此时，LLM 的注意力机制将专注于这些被提炼过的核心变量 1。
+
+### **预训练金融逻辑的应用与对冲路径推理**
+
+这一层的核心价值在于 LLM 的定性推理能力。  
+以做市商的对冲行为推演为例： 假设注入的盘后 JSON 变量明确指示：{"net\_gamma\_regime": "Deep Negative Gamma", "current\_price": 4940, "gamma\_flip\_level": 5000}。 此时，LLM 结合其金融预训练知识将展开深度推理 1。它会“意识到”标的资产价格在收盘时已经跌破了关键的 Gamma 翻转点（5000），进入了深负 Gamma 区间 1。在这种状态下，次日期权做市商为了保持账面的 Delta 中性，必须采取顺势对冲策略（Dynamic Delta Hedging）。这意味着若次日开盘市场继续下跌，做市商将被迫卖出标的股票以对冲风险；反之若出现短暂反弹，他们又会被迫买入 5。  
+基于这种非线性动力学的理解，LLM 会推导出：次日市场极易发生“趋势放大”与高波动率状态。结合暗池数据的辅助状态（若 DIX 极低），LLM 会得出一个明确的结论：次日开盘存在极大的下行真空风险。  
+同样，如果 JSON 变量中出现高 VEX（Vanna 暴露）指标，LLM 会调用相关知识，指出如果次日有重大宏观事件落地，隐含波动率（IV）的骤降将触发做市商账面 Delta 的剧烈漂移，从而迫使他们进场买入标的资产，形成隐蔽的轧空（Short Squeeze）推力 10。
+
+### **结构化输出：策略简报与市场情绪解读**
+
+在完成逻辑推演后，LLM 的行为是被强制约束的输出过程 1。它必须生成结构化的“策略简报”（Strategy Briefing）或“市场情绪解读”（Market Sentiment Interpretation），遵循统一的 Markdown 排版规范。  
+生成的盘后策略简报通常包含以下专业模块：
+
+1. **宏观共振概览 (Macro Resonance Overview)**：结合多源共振强度得分（如 85 分）定调市场的系统性风险或机遇水平，判断次日是否处于多空趋势明确的单边市 1。  
+2. **做市商动力学解析 (Market Maker Dynamics)**：基于当日收盘的 GEX 状态和 Gamma 墙位置，详述期权交易商次日的潜在买卖压力分布。明确指出价格在靠近 4950 核心支撑位时，会遇到怎样的对冲流向 1。  
+3. **暗池与机构资金流向 (Institutional Order Flow)**：结合 SPR/DIX 降维变量，解读“聪明钱”的实际头寸布局，剥离表面价格波动的杂音 11。  
+4. **次日战术执行建议 (Next-Day Tactical Execution Scenarios)**：这是基于上述所有推理得出的最终可执行策略。如果是负 Gamma 环境，LLM 会建议交易员次日缩短持仓周期、扩大止损幅度，并倾向于动量突破交易或做多波动率（Long Vega）；如果是正 Gamma 环境，则会建议在 4950 至 5125 的核心支撑与阻力之间进行高抛低吸的网格交易。
+
+## **系统工程化整合与离线批处理作业流**
+
+在摒弃了对毫秒级低延迟的苛求后，系统的工程化重心转移到了任务调度的可靠性、批处理的吞吐量以及大模型调用的容错管理上。
+
+### **算力隔离与任务调度部署**
+
+三层架构可以通过每日定时的离线任务流（如 Apache Airflow 或 Cron Job）串联运行：
+
+| 架构层级 | 计算特征属性 | 推荐部署模式 | 性能优化核心指标 |
+| :---- | :---- | :---- | :---- |
+| **第一层：数据提炼层** | 大规模数据读取、矩阵并行运算 | 本地计算节点或云端弹性批处理实例（如 AWS Batch），配置足够的内存以加载当日全量期权链 | 内存吞吐量与并行计算资源的有效调度 2 |
+| **第二层：上下文网关** | 轻量级序列化 | 同一本地环境内的 Python 脚本或简单的 Serverless 函数 | 数据清洗的完备性与 Schema 校验的严格度 |
+| **第三层：大语言模型层** | 云端 API 异步调用 | 对接外部大模型 API (如 OpenAI/Anthropic) 或本地大模型推理服务 | 并发调用的稳定性、防限流 (Rate Limit) 重试机制 |
+
+### **全链路离线批处理作业流 (Batch Processing Pipeline)**
+
+系统将在每日盘后设定一个标准的流水线生命周期：
+
+1. **数据就绪与下载 (T+0 16:15 \- 16:30)**：等待各大数据源（TDS/SPR）生成最终的日终结算文件，触发下载与落盘机制。  
+2. **批量清洗与向量化降维 (T+0 16:30 \- 16:35)**：启动第一层计算节点，在几分钟内完成海量数据的清洗、Black-Scholes 结算、GEX 加权聚合与多因子降维评分。  
+3. **常识防线审查与状态打包 (T+0 16:35 \- 16:36)**：执行 Pandera 与 Pydantic 严格校验。第二层生成超轻量 JSON 字典，若校验失败则立即拦截熔断。  
+4. **大模型推理与报告分发 (T+0 16:36 \- 16:40)**：将精简的 JSON 发送至 LLM。采用重试队列平稳处理 API 请求，生成完整的深度策略简报后，推送到终端用户的邮箱或系统看板中。
+
+## **历史状态的不可变审计与降级策略**
+
+### **网关状态持久化与回测优势**
+
+网关层 JSON 序列化的一个巨大工程优势在于其极其优秀的审计与可回溯性。在 Multi-source Resonance V2.0 系统中，每日盘后穿过第二层网关的 JSON 字典都会带上日期戳，归档至数据库中。  
+这些体积极小的日志文件构成了绝佳的系统回测（Backtesting）素材。量化团队可以随时提取过去任意一个交易日的网关状态 JSON，将这些真实发生过的状态作为微调（Fine-Tuning）语料或 Few-Shot Prompting 样例，重新输入给新的大模型版本，测试其是否能生成更加精准的市场复盘。这种基于统一结构化契约的机制，为项目策略的长期迭代提供了低成本、高效率的路径。
+
+### **容错与降级机制**
+
+虽然盘后分析对时间敏感度较低，但系统的容错能力依然关键。如果大模型 API 遭遇长时间的宕机，第二层的上下文网关会自动触发降级策略。系统将跳过策略简报的文字生成步骤，直接在用户看板上以可视化图表的形式，展示第二层提炼的 JSON 状态核心指标（如多源共振强度得分 85，跌破关键 Gamma 墙）。交易员依然可以在盘后阅读这些纯净的量化事实，自主完成次日推演。如果底层数据源缺失或数据校验模块拦截了异常数据，网关层会直接输出“数据流校验失败”的状态，彻底熔断推理，杜绝 LLM “无米之炊”带来的事实幻觉。
+
+## **多源共振体系的深层逻辑总结**
+
+Multi-source Resonance 项目的核心在于跨维度的数学收敛逻辑 1。当第一层架构将基于 TDS 的期权链动量指标、Gamma 暴露（做市商被动买卖压力）以及基于 SPR 的暗池现货吸筹力度聚合在一起时，如果这些独立维度同时指向同一方向，系统会在数学上赋予极高的共振得分 1。  
+在这个批处理体系下，LLM 扮演的是盘后终极策略师的角色。它站在确定性降维数据与严密数据校验防线的肩膀上，将罕见的多源维度共振，翻译为直指人心的次日实操建议。通过“数据提炼层”、“校验防线”、“上下文网关层”以及“大语言模型推理层”的严格解耦 1，Multi-source-Resonance V2.0 系统彻底跨越了文本生成模型与复杂数理计算之间的鸿沟。这一重构不仅最大化了策略产出的可靠性，更将系统盘后运营的大模型 API 成本降至极低，奠定了长期量化投研架构的坚实基础。
+
+#### **引用的著作**
+
+1. 访问时间为 十二月 31, 1969， [https://github.com/raymodny-ai/Multi-source-Resonance/blob/master/README.md](https://github.com/raymodny-ai/Multi-source-Resonance/blob/master/README.md)  
+2. fast-vollib A Fast Implied Volatility Library for Python with PyTorch, JAX, and CUDA Fused-Kernel Backends \- arXiv, 访问时间为 六月 11, 2026， [https://arxiv.org/html/2604.27210v1](https://arxiv.org/html/2604.27210v1)  
+3. py-vollib-vectorized \- PyPI, 访问时间为 六月 11, 2026， [https://pypi.org/project/py-vollib-vectorized/](https://pypi.org/project/py-vollib-vectorized/)  
+4. What is Gamma Exposure (GEX)? \- Unusual Whales, 访问时间为 六月 11, 2026， [https://unusualwhales.com/information/what-is-gamma-exposure-gex](https://unusualwhales.com/information/what-is-gamma-exposure-gex)  
+5. GEX (Gamma Exposure) Explained: What It Is and How SpotGamma Uses It, 访问时间为 六月 11, 2026， [https://support.spotgamma.com/hc/en-us/articles/15214161607827-GEX-Gamma-Exposure-Explained-What-It-Is-and-How-SpotGamma-Uses-It](https://support.spotgamma.com/hc/en-us/articles/15214161607827-GEX-Gamma-Exposure-Explained-What-It-Is-and-How-SpotGamma-Uses-It)  
+6. How to Calculate Gamma Exposure (GEX) and Zero Gamma Level, 访问时间为 六月 11, 2026， [https://perfiliev.com/blog/how-to-calculate-gamma-exposure-and-zero-gamma-level/](https://perfiliev.com/blog/how-to-calculate-gamma-exposure-and-zero-gamma-level/)  
+7. How does SqueezeMetrics calculate GEX (dealer gamma exposure)? I cannot reproduce the results : r/algotrading \- Reddit, 访问时间为 六月 11, 2026， [https://www.reddit.com/r/algotrading/comments/g4poro/how\_does\_squeezemetrics\_calculate\_gex\_dealer/](https://www.reddit.com/r/algotrading/comments/g4poro/how_does_squeezemetrics_calculate_gex_dealer/)  
+8. white\_paper.pdf \- sqzme, 访问时间为 六月 11, 2026， [https://squeezemetrics.com/monitor/download/pdf/white\_paper.pdf](https://squeezemetrics.com/monitor/download/pdf/white_paper.pdf)  
+9. Gamma Exposure (GEX): Understanding Dealer Hedging Flows, and Key Levels \- Moomoo, 访问时间为 六月 11, 2026， [https://www.moomoo.com/us/learn/detail-gamma-exposure-gex-understanding-dealer-hedging-flows-and-key-levels-107906-260473079](https://www.moomoo.com/us/learn/detail-gamma-exposure-gex-understanding-dealer-hedging-flows-and-key-levels-107906-260473079)  
+10. GEXStream \- Real-Time Gamma Exposure Analytics for Options Traders, 访问时间为 六月 11, 2026， [https://gexstream.com/](https://gexstream.com/)  
+11. Dark Index \- sqzme, 访问时间为 六月 11, 2026， [https://squeezemetrics.com/monitor/dix](https://squeezemetrics.com/monitor/dix)  
+12. A Handy-dandy Reference to the “Master Spreadsheet” (“GEX+ CSV” on the GammaVol page) The spreadsheet updates around 5:3, 访问时间为 六月 11, 2026， [https://squeezemetrics.com/monitor/static/guide.pdf](https://squeezemetrics.com/monitor/static/guide.pdf)
+
+[image1]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAaCAYAAAC+aNwHAAAA2ElEQVR4Xu2SoQoCQRCGR9QgiIJWw2KzWwWLb2G3mG0msZrEYDVYfQK57huYBd9BEf1/x4O9WQ8P04X74As3w/w77J5IQf4Zww08wLlXn8C+952gAZ/wBtumd4VHGMF6sqV04OmjS7becCOGL22DNEWbZ9vw4KkR7Jq6lOBCNICnpBEHBOuvRYentmGowKEtkotoQLBaVjhM/yZrQAtWbZFkDdiL3kPAXX4HODiwxZgRfMCZ6JNadnBriz4c4hNyC/77MWXR8BWsefVUONATPY1BTr5vVJArXpBTJTQhbMfiAAAAAElFTkSuQmCC>
+
+[image2]: <data:image/png;base64,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>
+
+[image3]: <data:image/png;base64,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>
+
+[image4]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAkQAAABQCAYAAAD4OGr+AAAFAUlEQVR4Xu3dWajtUxwH8GXMPGTO0DUlMiTlppQylUSSpJQXD1KeeNBVypBX8xMeSEqivBBRbpGIR1JKriGKUMqcYX1b+9/9n3X2Pufc694z3c+nft2713/vc/777If/t7V+679LAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgG2wf61Hap28nQUAsOZtrPVmPwgAsCt5rdYV/SAAwK7k6VqH9oMAALuK+2rt3Q8CADveAbWOqXVNWRtLM0eWdr7X1Tq9O7aeHF3r+34QANg5Dql1Wq1/az3QHVuNjqp1a61va53UHVtP3ql1YTe2b2mf00elBcLUC5OxfHbD2F2TsfwLACxRQkYuoFf3B1ap22ttLm12az3avdZzpQWgsTNrbaq1x2jsxdI+uz4c/lXrxm4MAFhAAsbbtQ7sD6xCCW+f1bq2P7BO7Fbr+lrHduMJR692Y5Hgk0DU+7jMD0kAwAx7ljbL8Gh/YJXKMlJCwFrtH9qntH6tg/oDEwk+L5e5s0CR9/thNxYJQ//0g9W7xe40AJgpdz5+uNYHpS07PV5Wd8C4qNYnpYWE72q9VabPiKy0J2v9Wdq59XXz5DlZCvu11u+l9UDtNxkfe7/WY/3gDJlFys9/pT8AACwsQeinyf+zPDNctP/vcll2fm1L5XcvJs/5u9azk8dHlK3nu1rkHG8q80PQUAlAF0+ee26ty0sLoX+UrUFpLKHvrH5whsyW5XdongaAJcqF+/7SZlvShzNIr0kfMBJYnqh1bze+nE6p9U2t27rxnGv6nXrpu9nQDy6DhMshYA7uLK0pelbo26u09/FVN54dYuPPZiFZesvM0Ne1juuOAQAznFjaxbPfWp/lsh9Gj8+v9Uatc0q74N5RZl/Yd6Z7SgsN48bg9DtlbNzvdFVpX376S63zRuOzHFzaz07gW0olvMwybINPABrL7q7NZeFdcHlden+G5+T2B9lCv1RZLttS2meUcAQALMEzpV2Ex7MJ0wLGF7V+Hj3O8exCW24JOP3MVZaIEt6m9TstNRDtSPm75ItX05c1GGZu+uDZu6TWb7XuLu1zyDLaQ3OesbCEsPx9Lu0PAACzDYFofPE+fDKWGY3MVKQy2/L66DnTZkCm+XIb67D2spmmBaJbSuuByu6pvH68E2slAtFTZf7uvMxopWH6gm68l9mlhKnPS3sv79W6bM4zFpbQ1QdcAGARw4zCIMHo+bI1YOTf8fJUbCyLLxvtLFtKCzmDNCPn8XCzwX4GZiUC0Q1l/nnk6zY+7cZmOaO0zyQB6sru2GKy3NYHRgBgEUOT8obJ45dKCx3DDRkz25Glm0F6bfrloOWUBvBc8NO/lEr/U3Zg5YaMx5f54WclAlFmdnKTyFMnj88urWl92pLeNJklyrJZ3md/V+pp0meUu1UniOU1qdzTKL9/JUIrAKxZw5ejDnJR73c25eK6qbQlqVzcMzuzUnKu4+W1PE4w6K1EIIqEtZzfCWX7QkmC6LY0UwMAyyAX+PHOsvTtrIWvyVipQAQArEPZZTYsxwz9LX1v0WqSPqgfy9bzfXDuYQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2Fn+A3Kg27VX1n1yAAAAAElFTkSuQmCC>
+
+[image5]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABEAAAAZCAYAAADXPsWXAAAA1klEQVR4Xu2Svw4BQRDGR0KhUihUCjWdSqGUeBhv4QUUKtFLtBqP4A28gAYJlULhz/fdZNxlstxtReGX/Jqd3e9m9lbkz1e4wwks+UJRqvABj7DtaoVgwBpeJA2KZghPcC4aQqNHOsMeLMOFaMhYIoIqogcZQBh2hTvYsk2fYMBS0gCjL9oNg3LhVw9+UTTc7iYXjsFOQnAkhjR9IQtHWIn+3hADeINb2HC1F13Rje+wt8NuRq6W0IF7vxjAXnHwbqaib2NWQAupJyczWCHGDazx8J9f5gneFjozpMZOugAAAABJRU5ErkJggg==>
+
+[image6]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAA0AAAAZCAYAAADqrKTxAAAAVklEQVR4XmNgGAWUAV8g/k8EboVpQAblDBBJEI0OVIH4ABDzoInj1QQCV4FYBF2QkKYLQGyMLkhIUwkQ66ELEtKEFYxqggKSNOFKew+BWBJJ3SigCgAAW7kouocA7PEAAAAASUVORK5CYII=>
+
+[image7]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAsAAAAcCAYAAAC3f0UFAAAAqklEQVR4XmNgGAUjEPAAsSQQewCxEJocHxDbIAv8h+K3QKyJLAEEO6BycAAytR+ITwOxILIEELxngBgCByBnHADiaGRBIBAD4n8MEOfBAchqkG5jZEEgyADizUDMiSzoxwBxlwiSmDYQvwZiQyQxMNjDgOoJViD+C8Q5SGJw8ByIf0PZ3EC8GIjjgJgRrgIJgEy9zgDxeS4DmhuRATMQ/2KAhCfI+lFAfQAAuOIbmhRrRxgAAAAASUVORK5CYII=>
+
+[image8]: <data:image/png;base64,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>
+
+[image9]: <data:image/png;base64,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>
+
+[image10]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADEAAAAaCAYAAAAe97TpAAABIklEQVR4Xu2VsWoCQRCGRySgoDEkIIppDQRCSp9ALEP6PIfa+wy2vkHaNMHOwiJFGtNr+ggGFCQJ8R93D3RAmW1chfngg7uZUe7n9naJDMMwjp0MvIYNeCl6J0MOduE/zIteTFpwBsuysYtnciGOgRH8g7/knkkd4gd+yWJk2hQYgoffZDEyQSEq5Iaf/P0NfCf3WrPJUASCQtTJLaVbfz2Aj3BB+/8gRa4fIm8iWtQheHt9gT34AEu+zrvVdzIUCXUIXkpjOIX97VZ01CGSwSt4769ftybioQ4hz4e5lzmD6Y2e5Bx+BtpZ/1KHOoQ8H5ZwQu6j5e8iJuoQ8nzgQB+wBocb9UNShFVyy5qfrwnvaM/OxmeCXDIXsCBqhmEYhpoVgCRHG2Z60lsAAAAASUVORK5CYII=>
+
+[image11]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEEAAAAaCAYAAADovjFxAAABOklEQVR4Xu2XP0uCURSHj4hgYBgK/aFmwaFGP4E0RkNbn6IhW/0QTkHfoNVF3BwaGlp0V/ccgoIoqN/hXEFPZR2h4uB54IHXe+59wd97733vSxQEQRAEi8jDPXgIS6q2MhRgC77BdVXzyBZswBHcUbWFXJOE4Jl92Cf5H6+0RAgv8F43OuaClgiB07vVjY4xh7BLEsJp+l2BdyRTa23ayRnmEOokS6GarnvwGD7R9zfhusWMDPt1TCHw67ENr+AR3E7t/LZ4mHZyiCkEXgpDOIHd+dK/0YSXP/RMhnzAFAJ35v2gDA/SdWeuh09MIejzwWOSycHsTO0zxkY57L/AFII+HzyTDOYNjPcFr5hC0OcDDmQAa/Bmpt0DPGs34QnJkuYHek4SBH8afAmfCfSU34BF1RYEQRAEK8I7P81MqtdnlfAAAAAASUVORK5CYII=>
+
+[image12]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAaCAYAAAAHfFpPAAAC80lEQVR4Xu2YS8hNURTHl1BE5JFHeSclxkpRBkSJwTeQYs5AGRiIpFsyMJMkoWQghZmUpL6vKPIVKSKZkMdAkgGFPNavdfa96667j3Pp6rtxfvWvc/573/1ce+3TFampqamp6Qu2qsZEcySYpHqv+qF6otrSXlzKLtXOaHYJE78czYJRqtti4/miOt1e3Fuuqxrunc6Z2KHiuQzqMED0J4vA73MLsFlsEzyzVK9Vi4PfE76rvgVviuqtalnwPY9Vt8QW4GEo64ZBsSMQuSbW5rjg4x0NXk+4ozoYTbEOz0ezYIZqb/HMAlJ3Wqu4K85KPsIOq25GU/mo+hTNvwmTGopmASG/sHhmAam7vVVcyUzVhmhWwALQT895pvogFnKjVffEziGdXXX1Ekz0hXufLK1FyIV0hF1n98s4IhZVnHfqnlCdFGsfP8IYOcIpHyXhrWlVy7NW9VTakws7wwRp5JjzE3elPWkCi0J9FqIKIof8kWOCWDv7nDdeLFniv3P+WNWBws/puWpps3aGi2IV2UHPbLEf01lsgLplt0PqeGIsCLBj3ACR1arPko8i8k3cEHaYzUukyNrvvF9CZzQamaN6KZaNWX0Pgyu7irgJaK/qbHPFLY+mckHs94tigdikCP/UNkmY94FmDYMEei54WTjvdPYmFog1QllKcgk6exU8D4mN0PYDjRBBuR2GdJtEWBDG2XDemUKe6apHqm3Bz0KY0tlQ8GFY8gMhIo5HM5A+jq7EgoKV0rmwiXSEIkwIf27xTp64odrRrGGsUn2V8vY7oNGY5eeLfRKvCD5HgcTIJ+mpCqWJkKQ8RMiD4HlS9Hg417RFu56GdO40OYGF6RqyOXdrYoHY7m90XmKdtCbWrUhqHo7F/eB50k2S8g5X8m7VJelM1OQhPpamii3SerHJ88n8W7BLZFZWeInks3uvYIc5AlXsERvPJrFwL4MF4sZCPPc9g1J9Rf6z8D2Ru/r+G7gd+uKPj5Fgnlj419T0CT8Bj564V7C6PKcAAAAASUVORK5CYII=>

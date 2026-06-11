@@ -562,20 +562,20 @@ class MainScheduler:
             )
                 
             if not latest_gex:
-                logger.warning("GEX数据缺失,跳过共振评估")
+                logger.warning("GEX数据缺失，该维度记0分，继续部分评估")
                 self.fallback_manager.record_failure('task_evaluate_resonance')
-                return
-                
-            # 计算各维度分值 - CPU密集型计算使用executor
-            gex_score = await loop.run_in_executor(
-                self.executor,
-                lambda: self.resonance_scorer.calculate_gex_score(
-                    gex_local=latest_gex['gex_local'],
-                    gex_calibrated=latest_gex['gex_calibrated'],
-                    flip_zone_crossed=latest_gex['gex_calibrated'] > 0,
-                    gex_trend='IMPROVING'
+                gex_score = {'score': 0.0, 'state': 'MISSING', 'details': 'GEX数据缺失'}
+            else:
+                # 计算各维度分值 - CPU密集型计算使用executor
+                gex_score = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.resonance_scorer.calculate_gex_score(
+                        gex_local=latest_gex['gex_local'],
+                        gex_calibrated=latest_gex['gex_calibrated'],
+                        flip_zone_crossed=latest_gex['gex_calibrated'] > 0,
+                        gex_trend='IMPROVING'
+                    )
                 )
-            )
                 
             vix_score = await loop.run_in_executor(
                 self.executor,
@@ -973,6 +973,14 @@ class MainScheduler:
             )
             
             logger.info(f"数据库备份完成: {backup_path}")
+            
+            # 清理旧备份 (保留最近7个)
+            removed = await loop.run_in_executor(
+                self.db_executor,
+                lambda: self.db.clean_old_backups(keep_count=7)
+            )
+            if removed > 0:
+                logger.info(f"已清理 {removed} 个旧备份文件")
             
         except Exception as e:
             logger.error(f"数据库备份任务失败: {e}", exc_info=True)

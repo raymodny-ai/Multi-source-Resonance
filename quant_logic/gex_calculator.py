@@ -1,16 +1,20 @@
 """
-多源共振监控系统 - Gamma敞口(GEX)计算引擎
+多源共振监控系统 V2.0 - Gamma敞口(GEX)计算引擎
 
 该模块实现期权Gamma风险暴露的计算和分析,包括:
 - Black-Scholes模型Delta和Gamma计算
-- 投资组合级别GEX聚合计算
+- 投资组合级别GEX聚合计算（向量化版）
 - Flip Zone和Put Wall识别
+- GEX Profile 曲线生成
+- 净 Gamma 区间分类
 - 盘后校准系数动态更新
 
 技术实现:
-- 使用scipy.stats进行概率分布计算
-- Pandas向量化运算提升性能
+- 可选 py_vollib_vectorized 加速（导入 bs_engine 向量化引擎）
+- Polars/Pandas 向量化运算提升性能
 - 支持内存中快速计算和批量处理
+
+该模块为 Layer 1 纯本地计算组件，严禁任何 LLM 依赖。
 """
 
 import numpy as np
@@ -19,6 +23,13 @@ from scipy import stats
 from typing import Dict, List, Optional, Tuple
 from utils.logger import getLogger
 from config.settings import Config
+
+# V2.0: 导入向量化 BS 引擎（可选）
+try:
+    from quant_logic.bs_engine import VectorizedBSEngine
+    VECTORIZED_AVAILABLE = True
+except ImportError:
+    VECTORIZED_AVAILABLE = False
 
 logger = getLogger('gex_calculator')
 
@@ -36,7 +47,20 @@ class GEXCalculator:
     
     RISK_FREE_RATE = Config.Thresholds.GEX_RISK_FREE_RATE  # 无风险利率5%
     CONTRACT_MULTIPLIER = Config.Thresholds.GEX_CONTRACT_MULTIPLIER  # 美股期权合约乘数
-    
+
+    def __init__(self):
+        """初始化 GEX 计算引擎 (V2.0: 懒加载向量化 BS 引擎)"""
+        self._bs_engine = None
+
+    @property
+    def bs_engine(self):
+        """懒加载向量化 BS 引擎"""
+        if self._bs_engine is None and VECTORIZED_AVAILABLE:
+            self._bs_engine = VectorizedBSEngine(
+                risk_free_rate=self.RISK_FREE_RATE
+            )
+        return self._bs_engine
+
     @staticmethod
     def _validate_inputs(
         strike: float, 
@@ -495,6 +519,256 @@ class GEXCalculator:
             float: 校准后的GEX值
         """
         return gex_local * alpha
+
+    # ═══════════════════════════════════════════
+    # V2.0 新增方法
+    # ═══════════════════════════════════════════
+
+    def calculate_portfolio_gex_vectorized(
+        self,
+        option_chain_df: pd.DataFrame,
+        spot_price: float
+    ) -> Dict[str, any]:
+        """向量化版组合 GEX 计算 (V2.0)
+
+        使用 bs_engine 向量化引擎或 NumPy 批量计算所有期权合约的 Gamma，
+        避免逐行 apply()，实现百万级合约的秒级处理。
+
+        Args:
+            option_chain_df: 期权链 DataFrame，须含 strike, type, expiry,
+                             bid, ask, volume, open_interest, implied_volatility,
+                             days_to_expiry
+            spot_price: 标的资产当前价格
+
+        Returns:
+            同 calculate_portfolio_gex 的返回格式
+        """
+        if option_chain_df.empty:
+            return self._empty_gex_result()
+
+        df = option_chain_df.copy()
+        df = df[df['open_interest'] > 0]
+        if df.empty:
+            return self._empty_gex_result()
+
+        # 准备向量化输入
+        strikes = df['strike'].to_numpy(dtype=float)
+        vols = df.get('implied_volatility', pd.Series(0.2, index=df.index)).to_numpy(dtype=float)
+        T = (df.get('days_to_expiry', pd.Series(30, index=df.index)) / 365.0).to_numpy(dtype=float)
+        oi = df['open_interest'].to_numpy(dtype=float)
+        option_types = df['type'].to_numpy()
+
+        # 向量化 Gamma 计算
+        if VECTORIZED_AVAILABLE and self.bs_engine is not None:
+            gamma = self.bs_engine.compute_gamma_only(
+                S=np.array([spot_price]),
+                K=strikes,
+                sigma=vols,
+                T=T,
+            )
+        else:
+            # 降级：NumPy 向量化
+            d1 = (np.log(spot_price / strikes) + (self.RISK_FREE_RATE + 0.5 * vols**2) * T) / (vols * np.sqrt(np.maximum(T, 1e-10)))
+            gamma = stats.norm.pdf(d1) / (spot_price * vols * np.sqrt(np.maximum(T, 1e-10)))
+            gamma = np.where(np.isnan(gamma) | np.isinf(gamma), 0.0, gamma)
+
+        # GEX 贡献 = gamma * 100 * OI * S^2
+        gex_contrib = gamma * self.CONTRACT_MULTIPLIER * oi * spot_price**2
+        gex_contrib = np.where(np.isnan(gex_contrib), 0.0, gex_contrib)
+
+        # Call / Put 分离
+        is_call = np.array([t.upper() == 'CALL' for t in option_types])
+        is_put = ~is_call
+        call_gex = float(np.sum(gex_contrib[is_call]))
+        put_gex = float(np.sum(gex_contrib[is_put]))
+        net_gex = call_gex - put_gex
+
+        # 按行权价分组
+        gex_by_strike = {}
+        for i, strike in enumerate(strikes):
+            s = float(strike)
+            gex_by_strike[s] = gex_by_strike.get(s, 0.0) + float(gex_contrib[i])
+
+        logger.info(
+            f"[V2.0 Vectorized] GEX: Call=${call_gex/1e9:.2f}B, "
+            f"Put=${put_gex/1e9:.2f}B, Net=${net_gex/1e9:.2f}B"
+        )
+
+        return {
+            'total_gex': float(call_gex + put_gex),
+            'call_gex': float(call_gex),
+            'put_gex': float(put_gex),
+            'gex_by_strike': gex_by_strike,
+            'net_gex': float(net_gex),
+        }
+
+    def calculate_gex_profile(
+        self,
+        option_chain_df: pd.DataFrame,
+        spot_price: float,
+        price_range_pct: float = 0.10,
+        num_steps: int = 40,
+    ) -> Dict[str, any]:
+        """生成完整 GEX 曲线 (Net GEX vs Price) (V2.0)
+
+        按 0.5% 价格步长计算不同标的价格下的净 GEX，用于精确 Flip Zone 定位。
+
+        Args:
+            option_chain_df: 期权链 DataFrame
+            spot_price: 当前标的价格
+            price_range_pct: 价格扫描范围 (±10%)
+            num_steps: 扫描步数
+
+        Returns:
+            {
+                'spot_prices': [price_0, price_1, ...],
+                'net_gex_values': [gex_0, gex_1, ...],
+                'current_spot': spot_price,
+                'current_net_gex': float,
+            }
+        """
+        low = spot_price * (1 - price_range_pct)
+        high = spot_price * (1 + price_range_pct)
+        scan_prices = np.linspace(low, high, num_steps)
+
+        net_gex_values = []
+        for p in scan_prices:
+            result = self.calculate_portfolio_gex_vectorized(option_chain_df, p)
+            net_gex_values.append(result['net_gex'])
+
+        current_result = self.calculate_portfolio_gex_vectorized(option_chain_df, spot_price)
+
+        return {
+            'spot_prices': scan_prices.tolist(),
+            'net_gex_values': net_gex_values,
+            'current_spot': spot_price,
+            'current_net_gex': current_result['net_gex'],
+        }
+
+    def aggregate_gex_by_expiry(
+        self,
+        option_chain_df: pd.DataFrame,
+        spot_price: float,
+    ) -> Dict[str, any]:
+        """按到期日分组计算 GEX 时间分布 (V2.0)
+
+        Args:
+            option_chain_df: 期权链 DataFrame（须含 expiry 列）
+            spot_price: 当前标的价格
+
+        Returns:
+            {
+                'gex_by_expiry': {expiry_date: net_gex},
+                'near_term_gex': float,  # 30天内到期
+                'medium_term_gex': float,  # 30-90天
+                'long_term_gex': float,  # >90天
+            }
+        """
+        df = option_chain_df.copy()
+        df = df[df['open_interest'] > 0]
+        if df.empty or 'expiry' not in df.columns:
+            return {'gex_by_expiry': {}, 'near_term_gex': 0, 'medium_term_gex': 0, 'long_term_gex': 0}
+
+        unique_expiries = df['expiry'].unique()
+        gex_by_expiry = {}
+
+        for expiry in unique_expiries:
+            subset = df[df['expiry'] == expiry]
+            result = self.calculate_portfolio_gex_vectorized(subset, spot_price)
+            gex_by_expiry[str(expiry)] = result['net_gex']
+
+        # 按到期远近分类
+        today = pd.Timestamp.now()
+        near_term = 0.0
+        medium_term = 0.0
+        long_term = 0.0
+        for expiry_str, net_gex in gex_by_expiry.items():
+            try:
+                days = (pd.Timestamp(expiry_str) - today).days
+            except Exception:
+                days = 60  # 默认中端
+            if days <= 30:
+                near_term += net_gex
+            elif days <= 90:
+                medium_term += net_gex
+            else:
+                long_term += net_gex
+
+        return {
+            'gex_by_expiry': gex_by_expiry,
+            'near_term_gex': near_term,
+            'medium_term_gex': medium_term,
+            'long_term_gex': long_term,
+        }
+
+    def find_top_walls(
+        self,
+        gex_by_strike: Dict[float, float],
+        top_n: int = 3,
+    ) -> Dict[str, List[float]]:
+        """识别 Top-N Put Walls 和 Call Walls (V2.0)
+
+        Args:
+            gex_by_strike: 按行权价分组的 GEX 字典
+            top_n: 返回前 N 个
+
+        Returns:
+            {'put_walls': [strike_1, strike_2, ...], 'call_walls': [strike_1, ...]}
+        """
+        put_strikes = {k: v for k, v in gex_by_strike.items() if v < 0}
+        call_strikes = {k: v for k, v in gex_by_strike.items() if v > 0}
+
+        put_walls = sorted(put_strikes, key=lambda k: put_strikes[k])[:top_n]
+        call_walls = sorted(call_strikes, key=lambda k: call_strikes[k], reverse=True)[:top_n]
+
+        return {
+            'put_walls': put_walls,
+            'call_walls': call_walls,
+        }
+
+    def calculate_net_gamma_regime(
+        self,
+        net_gex: float,
+        gex_historical: Optional[List[float]] = None,
+    ) -> str:
+        """基于净 GEX 符号和历史百分位判定市场区间 (V2.0)
+
+        分类:
+        - High Positive Gamma: 净 GEX > 0 且处于历史前 20%
+        - Positive Gamma: 净 GEX > 0
+        - Neutral: 净 GEX ≈ 0
+        - Negative Gamma: 净 GEX < 0
+        - Deep Negative Gamma: 净 GEX < 0 且处于历史后 10%
+
+        Args:
+            net_gex: 当前净 GEX
+            gex_historical: 历史净 GEX 列表（用于百分位判定）
+
+        Returns:
+            区间状态字符串
+        """
+        if net_gex > 0:
+            if gex_historical and len(gex_historical) >= 20:
+                pct = (np.sum(np.array(gex_historical) <= net_gex) / len(gex_historical)) * 100
+                if pct >= 80:
+                    return "High Positive Gamma"
+            return "Positive Gamma"
+        elif net_gex < 0:
+            if gex_historical and len(gex_historical) >= 20:
+                pct = (np.sum(np.array(gex_historical) <= net_gex) / len(gex_historical)) * 100
+                if pct <= 10:
+                    return "Deep Negative Gamma"
+            return "Negative Gamma"
+        else:
+            return "Neutral"
+
+    @staticmethod
+    def _empty_gex_result() -> Dict[str, any]:
+        """返回空的 GEX 结果"""
+        return {
+            'total_gex': 0.0, 'call_gex': 0.0, 'put_gex': 0.0,
+            'gex_by_strike': {}, 'net_gex': 0.0,
+        }
 
 
 # 便捷函数

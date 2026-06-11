@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { get } from './client'
-import type { DashboardScores } from '../types/api'
+import type { DashboardScores, CrossAssetHeatmap, ResonanceHistoryPoint, GEXCurve } from '../types/api'
 
 export function useDashboardScores() {
   return useQuery<DashboardScores>({
@@ -15,5 +15,29 @@ export function useRecentAlerts(limit = 5) {
     queryKey: ['dashboard', 'recent-alerts', limit],
     queryFn: () => get(`/dashboard/recent-alerts?limit=${limit}`),
     refetchInterval: 30_000,
+  })
+}
+
+export function useGEXCurve(days = 30) {
+  return useQuery<GEXCurve>({
+    queryKey: ['dashboard', 'gex-curve', days],
+    queryFn: () => get<GEXCurve>(`/dashboard/gex-curve?days=${days}`),
+    refetchInterval: 60_000,
+  })
+}
+
+export function useCrossAssetHeatmap() {
+  return useQuery<CrossAssetHeatmap>({
+    queryKey: ['dashboard', 'cross-asset-heatmap'],
+    queryFn: () => get<CrossAssetHeatmap>('/dashboard/cross-asset-heatmap'),
+    refetchInterval: 60_000,
+  })
+}
+
+export function useResonanceHistory(days = 30) {
+  return useQuery<ResonanceHistoryPoint[]>({
+    queryKey: ['dashboard', 'resonance-history', days],
+    queryFn: () => get<ResonanceHistoryPoint[]>(`/dashboard/resonance-history?days=${days}`),
+    refetchInterval: 60_000,
   })
 }

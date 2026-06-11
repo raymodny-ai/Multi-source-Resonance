@@ -1,0 +1,73 @@
+# =============================================================================
+# 多源共振监控系统 - systemd 服务单元
+# =============================================================================
+# 部署路径: /etc/systemd/system/multi-resonance.service
+#
+# 安装:
+#   sudo cp deploy/multi-resonance.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable multi-resonance
+#   sudo systemctl start multi-resonance
+#
+# 常用命令:
+#   sudo systemctl status multi-resonance   # 查看状态
+#   sudo journalctl -u multi-resonance -f   # 实时日志
+#   sudo systemctl restart multi-resonance  # 重启
+# =============================================================================
+
+[Unit]
+Description=Multi-source Resonance Monitor - 多源共振暗盘与流动性微观结构盘中自动监控系统
+Documentation=https://github.com/your-org/multi-source-resonance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=appuser
+Group=appuser
+WorkingDirectory=/opt/multi-resonance
+EnvironmentFile=/opt/multi-resonance/.env
+Environment=PATH=/opt/multi-resonance/venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+
+# 启动命令
+ExecStart=/opt/multi-resonance/venv/bin/python api_server.py
+
+# 优雅关闭: 先 SIGTERM, 超时后 SIGKILL
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# 自动重启策略
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# 资源限制
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=2G
+CPUQuota=200%
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/multi-resonance/logs /opt/multi-resonance/database /opt/multi-resonance/data /opt/multi-resonance/reports
+ReadOnlyPaths=/opt/multi-resonance/config
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

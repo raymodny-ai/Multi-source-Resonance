@@ -1,0 +1,33 @@
+# =============================================================================
+# 多源共振监控系统 - Prometheus 指标采集配置
+# =============================================================================
+# 部署路径: deploy/prometheus.yml → Docker 挂载到 /etc/prometheus/prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files: []
+
+scrape_configs:
+  # ── 多源共振应用指标 ──
+  - job_name: "multi-resonance"
+    metrics_path: "/api/metrics"
+    static_configs:
+      - targets: ["app:8524"]
+        labels:
+          service: "multi-resonance"
+          env: "production"
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+  # ── Prometheus 自监控 ──
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]

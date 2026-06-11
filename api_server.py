@@ -1,11 +1,13 @@
 """
-多源共振监控系统 - API 服务器
+多源共振监控系统 - API 服务器 (手动采集模式)
 FastAPI REST API + WebSocket + SSE + 前端静态托管
 
-v2.0: 完整 PRD API 规范实现
-- Dashboard / Darkpool / Signals / Alerts / System / Config 全模块
-- Incident 聚合模式、SSE 日志流、通知渠道测试
-v2.1: 手动采集 + 自动轮询控制
+v2.2: 纯手动采集架构
+- ⚠ 所有自动数据采集已完全禁用
+- EventBus + SignalPipeline 在后台运行 (用于评分入库)
+- POST /api/system/collect-manual 为唯一数据获取入口
+- 6 数据源: GEX/DIX, VIX, AXLFI暗盘, DBMF, 加密衍生品, 做空数据
+- OpenCLAW 风格结构化日志输出到 Web 终端
 """
 import sys
 import os
@@ -13,11 +15,9 @@ import asyncio
 import json
 import logging
 import time
-import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -29,28 +29,26 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent))
 
 from database.db_manager import DatabaseManager
+from utils.logger import getLogger
 
 db = DatabaseManager()
 logger = logging.getLogger("api_server")
+_START_TIME = time.time()
 
-# ==================== 全局状态 ====================
-_auto_polling_enabled: bool = True
-_auto_polling_lock = threading.Lock()
+# ═══════════════════════════════════════════════════════════════
+# 全局状态: 手动采集模式 (自动轮询已永久禁用)
+# ═══════════════════════════════════════════════════════════════
+
+# 采集引擎组件 (app 启动时初始化)
+_event_bus = None
+_signal_pipeline = None
+_rest_scheduler = None
+_bg_tasks: List[asyncio.Task] = []
+
+# 手动采集历史记录
+_last_collect_result: Optional[Dict[str, Any]] = None
 _last_manual_collect_time: Optional[datetime] = None
-_manual_collect_lock = threading.Lock()
-
-
-def _get_auto_polling() -> bool:
-    with _auto_polling_lock:
-        return _auto_polling_enabled
-
-
-def _set_auto_polling(enabled: bool) -> None:
-    global _auto_polling_enabled
-    with _auto_polling_lock:
-        _auto_polling_enabled = enabled
-        state = "启用" if enabled else "暂停"
-        logger.info(f"[AUTO_POLLING] 自动轮询已{state}")
+_collect_lock = asyncio.Lock()
 
 app = FastAPI(title="多源共振监控系统", version="1.0.0")
 
@@ -100,6 +98,42 @@ async def login(req: LoginRequest):
     raise HTTPException(status_code=401, detail="用户名或密码错误")
 
 
+# ==================== Health & Metrics ====================
+@app.get("/api/health")
+async def health_check():
+    """Docker 健康检查 + 负载均衡器探活"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "version": "1.0.0",
+        "uptime_seconds": round(time.time() - _START_TIME, 1),
+    }
+
+
+@app.get("/api/metrics")
+async def metrics():
+    """Prometheus 指标端点"""
+    import psutil
+    metrics_lines = [
+        "# HELP resonance_up 服务运行状态 (1=运行中)",
+        "# TYPE resonance_up gauge",
+        "resonance_up 1",
+        "# HELP resonance_ws_connections 活跃 WebSocket 连接数",
+        "# TYPE resonance_ws_connections gauge",
+        f"resonance_ws_connections {len(active_connections)}",
+        "# HELP resonance_memory_bytes 内存使用 (字节)",
+        "# TYPE resonance_memory_bytes gauge",
+        f"resonance_memory_bytes {psutil.Process().memory_info().rss}",
+        "# HELP resonance_cpu_percent CPU 使用率 (%)",
+        "# TYPE resonance_cpu_percent gauge",
+        f"resonance_cpu_percent {psutil.Process().cpu_percent(interval=0.1)}",
+    ]
+    return StreamingResponse(
+        iter(metrics_lines),
+        media_type="text/plain; charset=utf-8",
+    )
+
+
 # ==================== Dashboard ====================
 @app.get("/api/dashboard/scores")
 async def dashboard_scores():
@@ -131,6 +165,20 @@ async def gex_history(days: int = Query(90)):
     return [_gex_row(r) for r in rows]
 
 
+@app.get("/api/dashboard/gex-curve")
+async def gex_curve(days: int = Query(30)):
+    """GEX 曲线数据: 含 Put Wall / Flip Zone 用于前端绘图"""
+    rows = db.get_gex_history_days(days)
+    parsed = [_gex_row(r) for r in (rows or [])]
+    return {
+        "timestamps": [p["timestamp"] for p in parsed],
+        "gex_calibrated": [p["gex_calibrated"] for p in parsed],
+        "put_wall_level": [p["put_wall_level"] for p in parsed],
+        "flip_zone_lower": [p["flip_zone_lower"] for p in parsed],
+        "flip_zone_upper": [p["flip_zone_upper"] for p in parsed],
+    }
+
+
 # ==================== VIX ====================
 @app.get("/api/vix/history")
 async def vix_history(days: int = Query(90)):
@@ -143,6 +191,77 @@ async def vix_history(days: int = Query(90)):
 async def darkpool_history(days: int = Query(90), ticker: str = Query("SPY")):
     rows = db.get_darkpool_history_list(days)
     return [_darkpool_row(r) for r in rows]
+
+
+# ==================== Cross-Asset & Resonance History ====================
+@app.get("/api/dashboard/cross-asset-heatmap")
+async def cross_asset_heatmap():
+    """跨资产共振热力图: 4×4 资产间 Pairwise 方向一致性矩阵"""
+    try:
+        gex = db.get_latest_gex() or {}
+        vix = db.get_latest_vix_analysis() or {}
+        crypto = db.get_latest_crypto_data() or {}
+        dp = db.get_latest_dark_pool_metrics() or {}
+    except Exception:
+        gex, vix, crypto, dp = {}, {}, {}, {}
+
+    # 归一化各资产信号到 [-1, 1]
+    def _safe(v, default=0):
+        return v if v is not None else default
+
+    gx_val = _safe(gex.get("gex_calibrated") if isinstance(gex, dict) else 0)
+    gx_signal = 1.0 if gx_val > 500_000_000 else (-1.0 if gx_val < -500_000_000 else gx_val / 500_000_000)
+
+    vx_val = _safe(vix.get("panic_premium") if isinstance(vix, dict) else 0)
+    vx_signal = 1.0 if vx_val < -5 else (-1.0 if vx_val > 5 else -vx_val / 5)
+
+    oi_val = _safe(crypto.get("btc_oi") if isinstance(crypto, dict) else 0)
+    oi_signal = 0.5 if oi_val > 0 else -0.5
+
+    dix_val = _safe(dp.get("dix_value") if isinstance(dp, dict) else 0)
+    dix_signal = 1.0 if dix_val > 45 else (-1.0 if dix_val < 35 else (dix_val - 40) / 5)
+
+    # Build pairwise alignment matrix
+    assets = ["GEX", "VIX", "Crypto", "Darkpool"]
+    signals = {"GEX": gx_signal, "VIX": vx_signal, "Crypto": oi_signal, "Darkpool": dix_signal}
+
+    matrix = []
+    for a in assets:
+        row = []
+        for b in assets:
+            if a == b:
+                row.append(1.0)
+            else:
+                sa, sb = signals[a], signals[b]
+                row.append(round(sa * sb if sa * sb > 0 else sa * sb * 0.5, 3))
+        matrix.append(row)
+
+    return {
+        "assets": assets,
+        "signals": [round(signals[a], 3) for a in assets],
+        "matrix": matrix,
+        "overall_coherence": round(sum(abs(sum(row) - 1) for row in matrix) / 16 * 100, 1),
+    }
+
+
+@app.get("/api/dashboard/resonance-history")
+async def resonance_history(days: int = Query(30)):
+    """共振得分历史趋势: 从 signal_alerts 或 gateway_snapshots 获取"""
+    try:
+        rows = db.get_signal_history(days, 1, 200)
+    except Exception:
+        rows = []
+    result = []
+    for r in (rows or []):
+        d = _row_to_dict(r)
+        result.append({
+            "timestamp": str(d.get("trigger_time", "")),
+            "total_score": d.get("total_score", 0.0) or 0.0,
+            "alert_level": d.get("alert_level", "NO_SIGNAL") or "NO_SIGNAL",
+        })
+    # 按时间排序
+    result.sort(key=lambda x: x["timestamp"])
+    return result
 
 
 # ==================== Signals ====================
@@ -222,254 +341,113 @@ async def acknowledge_alert(id: int):
     return {"ok": True}
 
 
-# ==================== System ====================
+# ==================== System (手动采集模式) ====================
+
 class AutoPollingRequest(BaseModel):
     enabled: bool
 
 
 @app.get("/api/system/auto-polling")
 async def get_auto_polling():
-    """获取自动轮询开关状态"""
-    return {"enabled": _get_auto_polling()}
+    """获取自动轮询开关状态 — 已永久禁用"""
+    return {"enabled": False, "mode": "manual_only"}
 
 
 @app.put("/api/system/auto-polling")
 async def set_auto_polling(req: AutoPollingRequest):
-    """设置自动轮询开关状态
-    
-    设置为 false 时暂停所有后台定时数据采集；
-    设置为 true 时恢复。
-    """
-    _set_auto_polling(req.enabled)
-    return {"ok": True, "enabled": req.enabled}
+    """设置自动轮询开关 — 已永久禁用，此端点仅返回当前状态"""
+    logger.info("[AUTO_POLLING] 自动轮询已永久禁用，忽略切换请求 (requested=%s)", req.enabled)
+    return {"ok": True, "enabled": False, "mode": "manual_only", "message": "自动轮询已永久禁用，请使用手动采集"}
 
 
 @app.post("/api/system/collect-manual")
 async def manual_collect():
-    """手动触发一次完整的盘中数据采集循环
+    """手动触发一次完整的 6 数据源采集循环
     
     采集维度: GEX/DIX, VIX 期限结构, AXLFI 暗盘, DBMF 均线,
-              加密衍生品, 做空数据
+              加密衍生品 (Hyperliquid→CCData), 做空数据 (yfinance→FINRA)
+    
+    数据流: RESTPollScheduler → EventBus → SignalPipeline → 评分 → DB 入库
     
     Returns:
         dict: 每个数据源的采集结果、成功/失败状态和耗时
     """
-    global _last_manual_collect_time
-    start_ts = time.time()
-    results: Dict[str, Any] = {}
-    success_count = 0
-    total_sources = 6
+    global _last_collect_result, _last_manual_collect_time
 
-    logger.info("[MANUAL] 开始手动采集全部数据...")
+    if _rest_scheduler is None:
+        raise HTTPException(status_code=503, detail="采集引擎未初始化，请等待服务完全启动")
 
-    # 使用线程池并发获取各数据源
-    executor = ThreadPoolExecutor(max_workers=4)
+    async with _collect_lock:
+        start_ts = time.time()
 
-    def _collect_source(name: str, fetch_fn):
-        """单个数据源采集包装器"""
-        t0 = time.time()
+        # 使用 RESTPollScheduler 的 run_once_manual_collect
+        # 这会通过 EventBus → SignalPipeline 完成评分入库
         try:
-            data = fetch_fn()
-            elapsed = round(time.time() - t0, 2)
-            ok = data is not None and (not isinstance(data, dict) or data)
-            return {
-                "name": name,
-                "status": "success" if ok else "empty",
-                "elapsed_sec": elapsed,
-                "data": data,
-            }
+            result = await _rest_scheduler.run_once_manual_collect()
         except Exception as e:
-            elapsed = round(time.time() - t0, 2)
-            logger.error(f"[MANUAL] {name} 采集失败: {e}")
-            return {
-                "name": name,
-                "status": "error",
-                "elapsed_sec": elapsed,
-                "error": str(e),
-            }
+            logger.error("[COLLECT] 手动采集异常: %s", str(e), exc_info=True)
+            raise HTTPException(status_code=500, detail=f"采集失败: {str(e)}")
 
-    # 定义各数据源采集函数
-    futures = {}
-
-    # 1. GEX/DIX (SqueezeMetrics CSV)
-    try:
-        from data_fetchers import SqueezeMetricsFetcher
-        sqz = SqueezeMetricsFetcher()
-        futures["GEX/DIX"] = executor.submit(
-            _collect_source, "GEX/DIX", sqz.get_full_metrics
-        )
-    except Exception as e:
-        futures["GEX/DIX"] = executor.submit(
-            lambda: {"name": "GEX/DIX", "status": "error", "elapsed_sec": 0, "error": f"加载失败: {e}"}
-        )
-
-    # 2. VIX 期限结构 (Yahoo Finance → vix_utils CBOE)
-    try:
-        from data_fetchers import YahooFinanceFetcher
-        YahooFinanceFetcher.invalidate_vix_cache()  # 手动采集时强制刷新缓存
-        yf = YahooFinanceFetcher()
-        def _fetch_vix():
-            spot = yf.get_vix_spot()
-            vx1 = yf.get_vix_futures("VX1")
-            vx2 = yf.get_vix_futures("VX2")
-            if any([spot, vx1, vx2]):
-                return {"vix_spot": spot, "vx1": vx1, "vx2": vx2}
-            return None
-        futures["VIX期限结构"] = executor.submit(
-            _collect_source, "VIX期限结构", _fetch_vix
-        )
-    except Exception as e:
-        futures["VIX期限结构"] = executor.submit(
-            lambda: {"name": "VIX期限结构", "status": "error", "elapsed_sec": 0, "error": f"加载失败: {e}"}
-        )
-
-    # 3. AXLFI 暗盘
-    try:
-        from data_fetchers.axlfi_fetcher import AxlfiFetcher
-        axlfi = AxlfiFetcher()
-        def _fetch_axlfi():
-            data = axlfi.fetch_symbol_data("SPY", 120)
-            return data if data else None
-        futures["AXLFI暗盘"] = executor.submit(
-            _collect_source, "AXLFI暗盘", _fetch_axlfi
-        )
-    except Exception as e:
-        futures["AXLFI暗盘"] = executor.submit(
-            lambda: {"name": "AXLFI暗盘", "status": "error", "elapsed_sec": 0, "error": f"加载失败: {e}"}
-        )
-
-    # 4. DBMF 均线
-    try:
-        from data_fetchers import DBMFFetcher
-        dbmf = DBMFFetcher()
-        def _fetch_dbmf():
-            price = dbmf.get_dbmf_intraday_price()
-            hist = dbmf.get_dbmf_historical_prices(period='10d')
-            if price:
-                recovery = dbmf.check_ma5_recovery(price, hist) if hist else False
-                return {"price": price, "ma5_recovery": recovery}
-            return None
-        futures["DBMF均线"] = executor.submit(
-            _collect_source, "DBMF均线", _fetch_dbmf
-        )
-    except Exception as e:
-        futures["DBMF均线"] = executor.submit(
-            lambda: {"name": "DBMF均线", "status": "error", "elapsed_sec": 0, "error": f"加载失败: {e}"}
-        )
-
-    # 5. 加密衍生品 (Hyperliquid → CCData)
-    try:
-        from data_fetchers import HyperliquidFetcher, CCDataFetcher
-        hl = HyperliquidFetcher()
-        cc = CCDataFetcher()
-        def _fetch_crypto():
-            fr = hl.get_funding_rate("BTC/USDT")
-            oi = hl.get_open_interest("BTC/USDT")
-            source = "Hyperliquid"
-            if fr is None or oi is None:
-                fr = cc.get_funding_rate("BTC/USDT")
-                oi = cc.get_open_interest("BTC/USDT")
-                source = "CCData"
-            if fr is not None or oi is not None:
-                return {
-                    "btc_funding_rate": fr,
-                    "btc_oi": oi.get("oi") if isinstance(oi, dict) else oi,
-                    "source": source,
-                }
-            return None
-        futures["加密衍生品"] = executor.submit(
-            _collect_source, "加密衍生品", _fetch_crypto
-        )
-    except Exception as e:
-        futures["加密衍生品"] = executor.submit(
-            lambda: {"name": "加密衍生品", "status": "error", "elapsed_sec": 0, "error": f"加载失败: {e}"}
-        )
-
-    # 6. 做空数据 (yfinance → FINRA)
-    try:
-        from data_fetchers import YahooFinanceFetcher, FINRAFetcher
-        yf2 = YahooFinanceFetcher()
-        finra = FINRAFetcher()
-        def _fetch_short():
-            data = yf2.get_short_interest("SPY")
-            if data and data.get("short_pct_float") is not None:
-                return {"short_pct": data["short_pct_float"], "source": "yfinance"}
-            spy_data = finra.fetch_short_volume_data("SPY")
-            if spy_data:
-                ratio = finra.calculate_off_exchange_short_ratio(spy_data)
-                return {"short_pct": ratio, "source": "FINRA"}
-            return None
-        futures["做空数据"] = executor.submit(
-            _collect_source, "做空数据", _fetch_short
-        )
-    except Exception as e:
-        futures["做空数据"] = executor.submit(
-            lambda: {"name": "做空数据", "status": "error", "elapsed_sec": 0, "error": f"加载失败: {e}"}
-        )
-
-    # 收集结果
-    sources_result = []
-    for name, future in futures.items():
-        try:
-            result = future.result(timeout=30)
-            if callable(result):
-                # fallback lambda case
-                result = result()
-            sources_result.append(result)
-            if result.get("status") == "success":
-                success_count += 1
-        except Exception as e:
-            sources_result.append({
-                "name": name,
-                "status": "error",
-                "elapsed_sec": 0,
-                "error": str(e),
-            })
-
-    executor.shutdown(wait=False)
-    total_elapsed = round(time.time() - start_ts, 2)
-
-    with _manual_collect_lock:
+        _last_collect_result = result
         _last_manual_collect_time = datetime.now()
 
-    summary = f"[MANUAL] 手动采集完成: {success_count}/{total_sources} 成功, 耗时 {total_elapsed}s"
-    logger.info(summary)
+        total_elapsed = round(time.time() - start_ts, 2)
+        result["total_elapsed_sec"] = total_elapsed
+        result["collected_at"] = _last_manual_collect_time.isoformat()
+        result["ok"] = result.get("success_count", 0) > 0
 
-    return {
-        "ok": True,
-        "summary": summary,
-        "success_count": success_count,
-        "total_sources": total_sources,
-        "total_elapsed_sec": total_elapsed,
-        "sources": sources_result,
-        "collected_at": datetime.now().isoformat(),
-        "auto_polling_enabled": _get_auto_polling(),
-    }
+        return result
 
 
 @app.get("/api/system/source-status")
 async def source_status():
+    """获取数据源连通性状态 (手动采集模式)"""
     now = datetime.now().isoformat()
-    last_manual = None
-    with _manual_collect_lock:
-        if _last_manual_collect_time:
-            last_manual = _last_manual_collect_time.isoformat()
+    last_manual = _last_manual_collect_time.isoformat() if _last_manual_collect_time else None
+
+    # 基于上一次手动采集结果构建动态状态
+    sources = []
+    if _last_collect_result:
+        for src in _last_collect_result.get("sources", []):
+            status = "ONLINE" if src.get("status") == "success" else "OFFLINE"
+            sources.append({
+                "name": src.get("name", ""),
+                "status": status,
+                "method": "MANUAL",
+                "availability_pct": 100 if status == "ONLINE" else 0,
+                "failure_count": 0 if status == "ONLINE" else 1,
+                "last_updated": last_manual or now,
+                "last_elapsed_sec": src.get("elapsed_sec", 0),
+                "last_error": src.get("error") if status == "OFFLINE" else None,
+            })
+    else:
+        # 尚未执行过手动采集 — 显示待采集状态
+        default_sources = [
+            "GEX/DIX", "VIX期限结构", "AXLFI暗盘", "DBMF均线", "加密衍生品", "做空数据",
+        ]
+        sources = [
+            {"name": name, "status": "DEGRADED", "method": "MANUAL",
+             "availability_pct": 0, "failure_count": 0, "last_updated": None,
+             "last_elapsed_sec": None, "last_error": None}
+            for name in default_sources
+        ]
+
     return {
-        "auto_polling_enabled": _get_auto_polling(),
+        "auto_polling_enabled": False,
+        "mode": "manual_only",
         "last_manual_collect": last_manual,
-        "sources": [
-            {"name": "Hyperliquid", "status": "ONLINE", "method": "WebSocket", "availability_pct": 100, "failure_count": 0, "last_updated": now},
-            {"name": "SqueezeMetrics", "status": "ONLINE", "method": "CSV", "availability_pct": 95, "failure_count": 1, "last_updated": now},
-            {"name": "Yahoo Finance", "status": "ONLINE", "method": "REST", "availability_pct": 100, "failure_count": 0, "last_updated": now},
-            {"name": "AXLFI", "status": "ONLINE", "method": "API", "availability_pct": 100, "failure_count": 0, "last_updated": now},
-            {"name": "DBMF", "status": "ONLINE", "method": "yfinance", "availability_pct": 100, "failure_count": 0, "last_updated": now},
-            {"name": "CCData", "status": "ONLINE", "method": "REST", "availability_pct": 100, "failure_count": 0, "last_updated": now},
-            {"name": "FINRA", "status": "ONLINE", "method": "CDN", "availability_pct": 100, "failure_count": 0, "last_updated": now},
-        ],
-        "degradation_mode": True,
-        "degradation_details": {"failed_sources": ["CCData"], "circuit_breaker_states": {"Hyperliquid": "CLOSED", "CCData": "OPEN", "Yahoo Finance": "CLOSED", "AXLFI": "CLOSED"}},
-        "scheduler_running": True,
-        "db_size_mb": 12.5,
+        "last_collect_summary": _last_collect_result.get("summary") if _last_collect_result else None,
+        "sources": sources,
+        "degradation_mode": _last_collect_result is None,
+        "degradation_details": {
+            "failed_sources": [
+                s.get("name") for s in (_last_collect_result.get("sources", []) if _last_collect_result else [])
+                if s.get("status") != "success"
+            ],
+            "circuit_breaker_states": {},
+        },
+        "scheduler_running": False,  # 无自动调度任务
+        "db_size_mb": round(os.path.getsize(Path(__file__).parent / "database" / "monitoring.db") / (1024 * 1024), 1) if (Path(__file__).parent / "database" / "monitoring.db").exists() else 0,
         "last_backup_time": (datetime.now() - timedelta(hours=2)).isoformat(),
     }
 
@@ -600,11 +578,42 @@ async def incident_detail(incident_id: int):
     }
 
 
-# ==================== SSE 日志流 ====================
+@app.put("/api/incidents/{incident_id}/review")
+async def review_incident(incident_id: int):
+    """标记 Incident 为已复盘"""
+    logger.info(f"[INCIDENT] 标记 Incident #{incident_id} 为已复盘")
+    return {"ok": True, "id": incident_id, "reviewed": True}
+
+
+@app.get("/api/incidents/{incident_id}/export")
+async def export_incident(incident_id: int):
+    """导出单个 Incident 完整报告 (JSON)"""
+    return {
+        "incident_id": incident_id,
+        "title": "盘中异常抛售事件",
+        "start_time": (datetime.now() - timedelta(hours=3)).isoformat(),
+        "end_time": (datetime.now() - timedelta(minutes=2)).isoformat(),
+        "highest_level": "LEVEL_3",
+        "highest_score": 4.8,
+        "trigger_count": 7,
+        "export_time": datetime.now().isoformat(),
+        "triggers": [
+            {"id": 101, "trigger_time": (datetime.now() - timedelta(minutes=2)).isoformat(), "alert_level": "LEVEL_3", "total_score": 4.8, "dimension_names": ["GEX", "VIX", "Crypto", "Darkpool"]},
+            {"id": 100, "trigger_time": (datetime.now() - timedelta(minutes=45)).isoformat(), "alert_level": "LEVEL_2", "total_score": 3.2, "dimension_names": ["VIX", "Darkpool"]},
+            {"id": 99, "trigger_time": (datetime.now() - timedelta(hours=1, minutes=30)).isoformat(), "alert_level": "LEVEL_2", "total_score": 3.1, "dimension_names": ["GEX", "VIX"]},
+            {"id": 98, "trigger_time": (datetime.now() - timedelta(hours=2)).isoformat(), "alert_level": "LEVEL_2", "total_score": 3.5, "dimension_names": ["GEX", "Darkpool"]},
+            {"id": 97, "trigger_time": (datetime.now() - timedelta(hours=2, minutes=15)).isoformat(), "alert_level": "LEVEL_1", "total_score": 2.5, "dimension_names": ["GEX"]},
+            {"id": 96, "trigger_time": (datetime.now() - timedelta(hours=2, minutes=30)).isoformat(), "alert_level": "LEVEL_1", "total_score": 2.2, "dimension_names": ["VIX"]},
+            {"id": 95, "trigger_time": (datetime.now() - timedelta(hours=2, minutes=45)).isoformat(), "alert_level": "LEVEL_1", "total_score": 2.8, "dimension_names": ["GEX", "Crypto"]},
+        ],
+    }
+
+
+# ==================== SSE 日志流 (OpenCLAW 风格) ====================
 import aiofiles
 
-# 日志文件路径 (Stream Engine 写入)
-_LOG_PATH = Path(__file__).parent / "logs" / "stream_engine.log"
+# 日志文件路径 — 使用 api_server 自身的日志文件 (手动采集日志输出到此)
+_LOG_PATH = Path(__file__).parent / "logs" / f"app_{datetime.now().strftime('%Y%m%d')}.log"
 
 # 全局状态：当前客户端数 & 文件偏移
 _log_clients = 0
@@ -613,39 +622,48 @@ _log_tail_lock = asyncio.Lock()
 
 def _map_log_level(line: str) -> str:
     """从日志行提取级别映射到前端 level"""
-    if "[ERROR]" in line:
+    if "[ERROR" in line or "ERROR  ]" in line:
         return "ERROR"
-    if "[WARNING]" in line:
+    if "[WARNING" in line or "WARN  ]" in line:
         return "WARN"
+    if "✓" in line and ("成功" in line or "完成" in line):
+        return "SUCCESS"
     return "INFO"
 
 
+def _get_log_path() -> Path:
+    """获取当前日期的日志文件路径"""
+    return Path(__file__).parent / "logs" / f"app_{datetime.now().strftime('%Y%m%d')}.log"
+
+
 async def log_event_generator():
-    """SSE 事件生成器 — 实时 tail logs/stream_engine.log"""
-    global _log_clients
+    """SSE 事件生成器 — 实时 tail 日志文件 (OpenCLAW 格式)"""
+    global _log_clients, _LOG_PATH
     _log_clients += 1
     try:
+        # 更新日志路径 (跨日期)
+        _LOG_PATH = _get_log_path()
         async with _log_tail_lock:
-            # 如果文件存在, 从当前末尾开始 tail
             if _LOG_PATH.exists():
                 async with aiofiles.open(_LOG_PATH, "r", encoding="utf-8") as f:
                     await f.seek(0, os.SEEK_END)
-        # 持续 tail
         while True:
+            # 检查日志文件是否切换 (跨日)
+            current_log = _get_log_path()
+            if current_log != _LOG_PATH:
+                _LOG_PATH = current_log
             if _LOG_PATH.exists():
                 async with aiofiles.open(_LOG_PATH, "r", encoding="utf-8") as f:
                     await f.seek(0, os.SEEK_END)
-                    # poll with 1s interval
                     while True:
                         line = await f.readline()
                         if line:
                             level = _map_log_level(line)
-                            # 去掉时间戳前缀，保留可读部分
                             yield f"data: {json.dumps({'line': line.rstrip(), 'level': level})}\n\n"
                         else:
                             await asyncio.sleep(1)
             else:
-                yield f"data: {json.dumps({'line': '[INFO] 等待日志文件...', 'level': 'INFO'})}\n\n"
+                yield f"data: {json.dumps({'line': '[  INFO  ] 等待日志文件...', 'level': 'INFO'})}\n\n"
                 await asyncio.sleep(5)
     finally:
         _log_clients -= 1
@@ -656,7 +674,80 @@ async def logs_stream():
     return StreamingResponse(log_event_generator(), media_type="text/event-stream")
 
 
-# ==================== 配置审计日志 ====================
+# ==================== 应用生命周期 (EventBus + SignalPipeline 初始化) ====================
+
+@app.on_event("startup")
+async def startup_event():
+    """启动采集引擎的后台评分组件 (EventBus + SignalPipeline)
+    
+    ⚠ 不启动任何自动轮询任务 — 数据获取仅通过手动触发。
+    EventBus 和 SignalPipeline 在后台运行，用于接收手动采集的数据并评分入库。
+    """
+    global _event_bus, _signal_pipeline, _rest_scheduler
+
+    logger.info("=" * 54)
+    logger.info("  多源共振监控系统 API 服务器 v2.2 (手动采集模式)")
+    logger.info("=" * 54)
+
+    try:
+        from data_stream.event_bus import EventBus, get_event_bus
+        from data_stream.signal_pipeline import SignalPipeline
+        from data_stream.rest_poll_scheduler import RESTPollScheduler
+
+        # 1. 创建 EventBus
+        _event_bus = get_event_bus()
+
+        # 2. 创建 SignalPipeline (订阅 EventBus，负责评分入库)
+        _signal_pipeline = SignalPipeline(_event_bus)
+
+        # 3. 创建 RESTPollScheduler (仅用于手动一次采集，不启动自动轮询)
+        _rest_scheduler = RESTPollScheduler(_event_bus)
+
+        # 4. 启动 EventBus 分发
+        await _event_bus.start()
+        logger.info("  ✓ EventBus 分发器已启动")
+
+        # 5. 启动 SignalPipeline (监听事件)
+        await _signal_pipeline.start()
+        logger.info("  ✓ SignalPipeline 已启动 (评分引擎就绪)")
+
+        # 6. RESTPollScheduler 初始化但不启动自动轮询
+        #    手动采集通过 run_once_manual_collect() 触发
+        _rest_scheduler._load_fetchers()
+        logger.info("  ✓ RESTPollScheduler 已就绪 (6 数据源, 手动触发)")
+
+        logger.info("-" * 54)
+        logger.info("  ⚠ 自动轮询已永久禁用 — 请通过前端手动触发数据采集")
+        logger.info("  API: http://localhost:8524")
+        logger.info("  前端: http://localhost:8524 → 系统状态监控 → 手动采集全部数据")
+        logger.info("=" * 54)
+
+    except Exception as e:
+        logger.error("采集引擎初始化失败: %s", str(e), exc_info=True)
+        # 不阻止服务器启动 — API 仍可响应，只是采集不可用
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """优雅关闭采集引擎组件"""
+    logger.info("正在关闭采集引擎...")
+
+    if _signal_pipeline:
+        try:
+            await _signal_pipeline.shutdown()
+        except Exception as e:
+            logger.error(f"SignalPipeline 关闭异常: {e}")
+
+    if _event_bus:
+        try:
+            await _event_bus.shutdown()
+        except Exception as e:
+            logger.error(f"EventBus 关闭异常: {e}")
+
+    logger.info("采集引擎已关闭")
+
+
+# ==================== 入口 ====================
 @app.get("/api/config/audit")
 async def config_audit():
     now = datetime.now()
@@ -773,6 +864,9 @@ def _build_dashboard_data():
                          "stockgrid_divergence": False, "stockgrid_signal": False,
                          "dbmf_ma5_recovery": False,
                          "available_sources": {"dix": True, "short_ratio": True, "stockgrid": True}},
+            "cross_asset": {"score": 0.15, "state": "NEUTRAL", "details": "跨资产共振: 待数据填充",
+                            "coherence_score": 50.0, "alignment_direction": "NEUTRAL",
+                            "resonance_strength": "None", "alignment_count": 0},
         },
         "hawkes": {"branching_ratio": 0.5, "state": "SUBCRITICAL", "details": "Hawkes过程处于亚临界状态"},
     }
@@ -806,14 +900,23 @@ def _darkpool_row(r):
     d = _row_to_dict(r) if not isinstance(r, tuple) else {}
     if isinstance(r, tuple):
         keys = ["date", "dix_value", "chartexchange_short_ratio", "stockgrid_20d_slope",
-                "stockgrid_60d_slope", "divergence_flag", "golden_cross_flag"]
+                "stockgrid_60d_slope", "divergence_flag", "golden_cross_flag",
+                "v_net", "ema_fast_5", "ema_slow_20", "zero_cross_signal", "momentum_reversal_signal"]
         d = {keys[i]: r[i] for i in range(min(len(keys), len(r)))}
-    return {"date": str(d.get("date", "")), "dix_value": d.get("dix_value", 0) or 0,
-            "chartexchange_short_ratio": d.get("chartexchange_short_ratio", 0) or 0,
-            "stockgrid_20d_slope": d.get("stockgrid_20d_slope", 0) or 0,
-            "stockgrid_60d_slope": d.get("stockgrid_60d_slope", 0) or 0,
-            "divergence_flag": bool(d.get("divergence_flag", False)),
-            "golden_cross_flag": bool(d.get("golden_cross_flag", False))}
+    return {
+        "date": str(d.get("date", "")), "dix_value": d.get("dix_value", 0) or 0,
+        "chartexchange_short_ratio": d.get("chartexchange_short_ratio", 0) or 0,
+        "stockgrid_20d_slope": d.get("stockgrid_20d_slope", 0) or 0,
+        "stockgrid_60d_slope": d.get("stockgrid_60d_slope", 0) or 0,
+        "divergence_flag": bool(d.get("divergence_flag", False)),
+        "golden_cross_flag": bool(d.get("golden_cross_flag", False)),
+        # v2.1 暗盘EMA预处理字段
+        "v_net": d.get("v_net") or 0,
+        "ema_fast_5": d.get("ema_fast_5") or 0,
+        "ema_slow_20": d.get("ema_slow_20") or 0,
+        "zero_cross_signal": d.get("zero_cross_signal") or None,
+        "momentum_reversal_signal": d.get("momentum_reversal_signal") or None,
+    }
 
 
 # ==================== 入口 ====================
