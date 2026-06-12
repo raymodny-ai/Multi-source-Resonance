@@ -45,21 +45,18 @@ class CCDataFetcher:
     Attributes:
         api_key: CCData API 密钥
         session: requests 会话对象
-        mock_mode: Mock 模式开关
     """
 
     BASE_URL = "https://data-api.cryptocompare.com"
     DEFAULT_MARKET = "binance"
 
-    def __init__(self, api_key: Optional[str] = None, mock_mode: bool = False):
+    def __init__(self, api_key: Optional[str] = None):
         """初始化 CCData 数据获取器
 
         Args:
             api_key: CCData API 密钥，未提供时从 Config 读取
-            mock_mode: Mock 模式开关
         """
         self.api_key = api_key or Config.CCDATA_API_KEY
-        self.mock_mode = mock_mode or not self.api_key
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -70,8 +67,10 @@ class CCDataFetcher:
         if self.api_key:
             self.session.headers['Authorization'] = f'Apikey {self.api_key}'
 
-        mode = 'mock (无API Key)' if self.mock_mode else 'live'
-        logger.info(f"CCDataFetcher 初始化完成 (mode={mode})")
+        if not self.api_key:
+            logger.error("CCDataFetcher: API Key 未配置，数据源不可用")
+        else:
+            logger.info("CCDataFetcher 初始化完成 (live mode)")
 
     def _normalize_symbol(self, symbol: str) -> tuple:
         """标准化交易对符号 → (market, instrument)
@@ -113,8 +112,9 @@ class CCDataFetcher:
             >>> if rate is not None:
             ...     print(f"Binance 资金费率: {rate*100:.4f}%")
         """
-        if self.mock_mode:
-            return self._mock_funding_rate()
+        if not self.api_key:
+            logger.error("CCData: 无 API Key，无法获取资金费率")
+            return None
 
         market, instrument = self._normalize_symbol(symbol)
 
@@ -186,8 +186,9 @@ class CCDataFetcher:
         Returns:
             dict: 包含 'oi' 和 'timestamp'，失败返回 None
         """
-        if self.mock_mode:
-            return self._mock_open_interest()
+        if not self.api_key:
+            logger.error("CCData: 无 API Key，无法获取 OI")
+            return None
 
         market, instrument = self._normalize_symbol(symbol)
 
@@ -261,14 +262,11 @@ class CCDataFetcher:
             limit: 返回条数
 
         Returns:
-            list: 清算事件列表，或 Mock 数据
+            list: 清算事件列表，或 None
         """
-        if self.mock_mode:
-            return self._mock_liquidation_data(limit)
-
-        # CCData Free Tier 可能无清算端点，返回 Mock
-        logger.debug("CCData Free Tier 可能无清算端点，返回 Mock 数据")
-        return self._mock_liquidation_data(limit)
+        # CCData Free Tier 无清算端点
+        logger.debug("CCData Free Tier 无清算端点")
+        return None
 
     def calculate_oi_change_1h(
         self, current_oi: float, historical_oi_list: List[float]
@@ -299,44 +297,14 @@ class CCDataFetcher:
             logger.error(f"计算 OI 变化率失败: {e}", exc_info=True)
             return None
 
-    # ---- Mock 数据方法 ----
-
-    def _mock_funding_rate(self) -> float:
-        import random
-        return round(random.uniform(-0.001, 0.001), 6)
-
-    def _mock_open_interest(self) -> Dict[str, Any]:
-        import random
-        return {
-            'oi': round(random.uniform(10_000_000_000, 30_000_000_000), 2),
-            'timestamp': datetime.now(),
-        }
-
-    def _mock_liquidation_data(self, limit: int) -> List[Dict[str, Any]]:
-        import random
-        data = []
-        for i in range(limit):
-            ts = datetime.now() - timedelta(hours=i)
-            long_liq = random.uniform(1_000_000, 50_000_000)
-            short_liq = random.uniform(1_000_000, 50_000_000)
-            data.append({
-                'timestamp': ts,
-                'long_liquidation': long_liq,
-                'short_liquidation': short_liq,
-                'total_liquidation': long_liq + short_liq,
-            })
-        return data
-
-
 # 便捷函数
-def create_ccdata_fetcher(api_key: Optional[str] = None, mock_mode: bool = False) -> CCDataFetcher:
+def create_ccdata_fetcher(api_key: Optional[str] = None) -> CCDataFetcher:
     """创建 CCData 数据获取器实例
 
     Args:
         api_key: CCData API 密钥
-        mock_mode: Mock 模式开关
 
     Returns:
         CCDataFetcher
     """
-    return CCDataFetcher(api_key=api_key, mock_mode=mock_mode)
+    return CCDataFetcher(api_key=api_key)

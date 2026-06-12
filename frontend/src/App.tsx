@@ -5,6 +5,7 @@ import DarkpoolDetail from './pages/DarkpoolDetail'
 import SignalsPanel from './pages/SignalsPanel'
 import AlertCenter from './pages/AlertCenter'
 import SystemStatus from './pages/SystemStatus'
+import LLMAnalysis from './pages/LLMAnalysis'
 import ConfigPanel from './pages/ConfigPanel'
 
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
           <Route path="darkpool" element={<DarkpoolDetail />} />
           <Route path="signals" element={<SignalsPanel />} />
           <Route path="alerts" element={<AlertCenter />} />
+          <Route path="llm" element={<LLMAnalysis />} />
           <Route path="system" element={<SystemStatus />} />
           <Route path="config" element={<ConfigPanel />} />
         </Route>

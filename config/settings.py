@@ -13,10 +13,13 @@
 import os
 from pathlib import Path
 from typing import List, Optional
+import os as _os
+from pathlib import Path as _Path
 from dotenv import load_dotenv
 
-# 加载环境变量
-load_dotenv()
+# 加载环境变量 — 使用项目根目录绝对路径确保任何 CWD 都能找到 .env
+_ENV_FILE = _Path(__file__).resolve().parent.parent / '.env'
+load_dotenv(dotenv_path=str(_ENV_FILE))
 
 
 class Config:
@@ -259,7 +262,7 @@ class Config:
                 else:
                     warnings.append("Tradier沙箱模式已启用,使用延迟15分钟的免费数据")
             else:
-                warnings.append("TRADIER_API_KEY未配置,GEX计算将使用Mock数据")
+                warnings.append("TRADIER_API_KEY未配置, GEX计算不可用")
         
         if not cls.SQUEEZEMETRICS_API_KEY:
             warnings.append("SQUEEZEMETRICS_API_KEY未配置,暗盘指标将通过公开CSV免费获取(已内置支持)")

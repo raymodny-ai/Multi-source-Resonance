@@ -15,44 +15,6 @@ import { ChevronDown } from 'lucide-react'
 
 type RangeOption = 30 | 60 | 90 | 120
 
-function generateMockData(days: number): DarkpoolHistoryPoint[] {
-  const data: DarkpoolHistoryPoint[] = []
-  const now = new Date()
-  
-  let vNetBase = 500000  // 基准净做空量（股）
-  for (let i = days; i >= 0; i--) {
-    const d = new Date(now)
-    d.setDate(d.getDate() - i)
-    const base = 40 + Math.sin(i * 0.15) * 8
-    
-    
-    vNetBase += (Math.random() - 0.48) * 200000  // 略微偏向减少做空
-    const vNet = vNetBase + Math.random() * 100000
-    const emaFast = vNet + Math.random() * 50000
-    const emaSlow = vNet + Math.random() * 80000 + 100000
-    
-    
-    const zeroCross: string | null = (i === Math.floor(days * 0.3) && vNet > 0) ? 'BULLISH' : null
-    const momentum: string | null = (i <= 3 && vNet > 0) ? 'EARLY_SELL_WARNING' : null
-    
-    data.push({
-      date: d.toISOString().split('T')[0],
-      dix_value: base + Math.random() * 4,
-      chartexchange_short_ratio: base + 1 + Math.random() * 3,
-      stockgrid_20d_slope: Math.sin(i * 0.12) * 0.003,
-      stockgrid_60d_slope: Math.sin(i * 0.08) * 0.0025,
-      divergence_flag: i % 15 === 0,
-      golden_cross_flag: i % 20 === 0,
-      v_net: vNet,
-      ema_fast_5: emaFast,
-      ema_slow_20: emaSlow,
-      zero_cross_signal: zeroCross,
-      momentum_reversal_signal: momentum,
-    })
-  }
-  return data
-}
-
 export default function DarkpoolDetail() {
   const [range, setRange] = useState<RangeOption>(90)
   const [ticker, setTicker] = useState('SPY')
@@ -61,18 +23,16 @@ export default function DarkpoolDetail() {
   const { data: tickers } = useTickers()
   const { data: historyData, isLoading } = useDarkpoolHistory(range)
 
-  const chartData = useMemo(() => {
-    if (historyData && historyData.length > 0) return historyData
-    return generateMockData(range)
-  }, [historyData, range])
+  const chartData = historyData
 
-  const latest = chartData[chartData.length - 1]
-  const dateLabels = chartData.map((d) => d.date.slice(5))
+  const latest = chartData?.[chartData.length - 1]
+  const dateLabels = chartData?.map((d) => d.date.slice(5)) ?? []
 
   const currentTicker = tickers?.find((t) => t.symbol === ticker) ?? { symbol: 'SPY', name: 'S&P 500 ETF' }
 
   // --- DIX Chart Option ---
   const dixOption = useMemo(() => {
+    if (!chartData || chartData.length === 0) return {} as EChartsOption
     const threshold = 45
     const aboveThreshold = chartData.map((d, i) => d.dix_value > threshold ? { coord: [i, d.dix_value], value: d.dix_value.toFixed(1), symbol: 'pin', symbolSize: 8, itemStyle: { color: '#ef4444' } } : null).filter(Boolean)
     return {
@@ -98,24 +58,28 @@ export default function DarkpoolDetail() {
   }, [chartData, dateLabels, range])
 
   // --- Short Volume Chart Option ---
-  const shortVolumeOption = useMemo(() => ({
-    backgroundColor: 'transparent',
-    grid: { top: 20, right: 30, bottom: 50, left: 45 },
-    xAxis: { type: 'category' as const, data: dateLabels, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8', fontSize: 9, rotate: 45, interval: Math.floor(dateLabels.length / 8) } },
-    yAxis: { type: 'value' as const, min: 0, max: 100, axisLabel: { color: '#94a3b8', fontSize: 10, formatter: '{value}%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
-    series: [{
-      name: 'Short Volume', type: 'line' as const, data: chartData.map((d) => d.chartexchange_short_ratio), smooth: true,
-      lineStyle: { color: '#eab308', width: 2 }, itemStyle: { color: '#eab308' }, symbol: 'none',
-      markLine: { silent: true, symbol: 'none', lineStyle: { color: '#ef4444', type: 'dashed', width: 1.5 },
-        data: [{ yAxis: 45, label: { formatter: '45%', color: '#ef4444', fontSize: 10, position: 'end' } }] },
-      areaStyle: { color: 'rgba(234,179,8,0.08)' },
-    }],
-    tooltip: { trigger: 'axis' as const, backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 11 } },
-    dataZoom: [{ type: 'inside', start: Math.max(0, 100 - (90 / range) * 100), end: 100 }],
-  }), [chartData, dateLabels, range])
+  const shortVolumeOption = useMemo(() => {
+    if (!chartData || chartData.length === 0) return {} as EChartsOption
+    return {
+      backgroundColor: 'transparent',
+      grid: { top: 20, right: 30, bottom: 50, left: 45 },
+      xAxis: { type: 'category' as const, data: dateLabels, axisLine: { lineStyle: { color: '#334155' } }, axisLabel: { color: '#94a3b8', fontSize: 9, rotate: 45, interval: Math.floor(dateLabels.length / 8) } },
+      yAxis: { type: 'value' as const, min: 0, max: 100, axisLabel: { color: '#94a3b8', fontSize: 10, formatter: '{value}%' }, splitLine: { lineStyle: { color: '#1e293b' } } },
+      series: [{
+        name: 'Short Volume', type: 'line' as const, data: chartData.map((d) => d.chartexchange_short_ratio), smooth: true,
+        lineStyle: { color: '#eab308', width: 2 }, itemStyle: { color: '#eab308' }, symbol: 'none',
+        markLine: { silent: true, symbol: 'none', lineStyle: { color: '#ef4444', type: 'dashed', width: 1.5 },
+          data: [{ yAxis: 45, label: { formatter: '45%', color: '#ef4444', fontSize: 10, position: 'end' } }] },
+        areaStyle: { color: 'rgba(234,179,8,0.08)' },
+      }],
+      tooltip: { trigger: 'axis' as const, backgroundColor: '#1e293b', borderColor: '#334155', textStyle: { color: '#f1f5f9', fontSize: 11 } },
+      dataZoom: [{ type: 'inside', start: Math.max(0, 100 - (90 / range) * 100), end: 100 }],
+    } as EChartsOption
+  }, [chartData, dateLabels, range])
 
   // --- Stockgrid Chart Option ---
   const stockgridOption = useMemo(() => {
+    if (!chartData || chartData.length === 0) return {} as EChartsOption
     const divergences = chartData
       .map((d, i) => d.divergence_flag ? { coord: [i, d.stockgrid_20d_slope], value: '底背离', symbol: 'triangle', symbolRotate: 180, symbolSize: 10, itemStyle: { color: '#ef4444' } } : null)
       .filter(Boolean)
@@ -145,7 +109,9 @@ export default function DarkpoolDetail() {
   }, [chartData, dateLabels, range])
 
   // --- V_net + EMA 预处理图表 ---
-  const vNetOption = useMemo(() => ({
+  const vNetOption = useMemo(() => {
+    if (!chartData || chartData.length === 0) return {} as EChartsOption
+    return {
     backgroundColor: 'transparent',
     grid: { top: 20, right: 30, bottom: 50, left: 70 },
     legend: { data: ['V_net', 'EMA-5 快线', 'EMA-20 慢线'], textStyle: { color: '#94a3b8', fontSize: 10 }, bottom: 5 },
@@ -178,7 +144,8 @@ export default function DarkpoolDetail() {
       },
     },
     dataZoom: [{ type: 'inside', start: Math.max(0, 100 - (120 / range) * 100), end: 100 }],
-  } as EChartsOption), [chartData, dateLabels, range])
+  } as EChartsOption
+  }, [chartData, dateLabels, range])
 
   if (isLoading && !historyData) {
     return (

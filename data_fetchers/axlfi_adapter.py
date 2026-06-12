@@ -78,13 +78,12 @@ class AxlfiAdapter:
         data = adapter.fetch_symbol_data("SPY")
     """
 
-    def __init__(self, mock_mode: bool = False):
+    def __init__(self):
         from data_fetchers.axlfi_fetcher import AxlfiFetcher
-        self._fetcher = AxlfiFetcher(mock_mode=mock_mode)
-        self._mock_mode = mock_mode
+        self._fetcher = AxlfiFetcher()
         self._last_known_structure: Dict[str, Any] = {}
 
-        logger.info(f"AxlfiAdapter 初始化完成 (mock_mode={mock_mode})")
+        logger.info("AxlfiAdapter 初始化完成 (live mode)")
 
     # ── 公开接口: 质量报告 ──
 
@@ -253,6 +252,6 @@ class AxlfiAdapter:
 # 工厂函数
 # ═══════════════════════════════════════════════════════════════
 
-def create_axlfi_adapter(mock_mode: bool = False) -> AxlfiAdapter:
+def create_axlfi_adapter() -> AxlfiAdapter:
     """创建 AXLFI 适配器实例"""
-    return AxlfiAdapter(mock_mode=mock_mode)
+    return AxlfiAdapter()

@@ -36,13 +36,12 @@ class SqueezeMetricsFetcher:
     - CSV 格式稳定，轻量级
     """
 
-    def __init__(self, mock_mode: bool = False):
-        self.mock_mode = mock_mode
+    def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
-        logger.info(f"SqueezeMetricsFetcher 初始化 (mock_mode={mock_mode})")
+        logger.info(f"SqueezeMetricsFetcher 初始化 (live mode)")
 
     # ==================== 核心方法 ====================
 
@@ -66,9 +65,6 @@ class SqueezeMetricsFetcher:
                 'gex': 3131028235.51, # GEX 美元总值
             }
         """
-        if self.mock_mode:
-            return self._get_mock_full_metrics()
-
         try:
             logger.info(f"下载 SqueezeMetrics CSV: {DataFetchConfig.SQUEEZEMETRICS_CSV_URL}")
             resp = self.session.get(DataFetchConfig.SQUEEZEMETRICS_CSV_URL, timeout=15)
@@ -109,15 +105,11 @@ class SqueezeMetricsFetcher:
 
     def get_daily_dix(self) -> Optional[float]:
         """获取每日 DIX 百分比值 (兼容旧接口)"""
-        if self.mock_mode:
-            return self._get_mock_dix()
         data = self.get_full_metrics()
         return data['dix'] if data else None
 
     def get_daily_gex(self) -> Optional[float]:
         """获取每日 GEX 总值 (从 DIX.csv, GEX.csv 不存在)"""
-        if self.mock_mode:
-            return 2.5e9
         data = self.get_full_metrics()
         return data['gex'] if data else None
 
@@ -134,9 +126,6 @@ class SqueezeMetricsFetcher:
         Returns:
             {'total_gex': float, 'timestamp': str}
         """
-        if self.mock_mode:
-            return self._get_mock_gamma_profile()
-
         data = self.get_full_metrics()
         if not data:
             return None
@@ -157,17 +146,6 @@ class SqueezeMetricsFetcher:
         Returns:
             DataFrame with columns: date, price, dix, gex
         """
-        if self.mock_mode:
-            import random
-            from datetime import datetime, timedelta
-            dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(days)[::-1]]
-            return pd.DataFrame({
-                'date': dates,
-                'price': [7000 + i*2 + random.uniform(-50,50) for i in range(days)],
-                'dix': [random.uniform(0.35, 0.50) for _ in range(days)],
-                'gex': [3e9 + i*1e7 + random.uniform(-5e8,5e8) for i in range(days)],
-            })
-
         try:
             resp = self.session.get(DataFetchConfig.SQUEEZEMETRICS_CSV_URL, timeout=15)
             resp.raise_for_status()
@@ -177,29 +155,5 @@ class SqueezeMetricsFetcher:
             logger.error(f"获取历史数据失败: {e}")
             return None
 
-    # ==================== Mock ====================
-    def _get_mock_full_metrics(self) -> Dict[str, Any]:
-        import random
-        from datetime import date
-        return {
-            'date': str(date.today()),
-            'price': round(random.uniform(7000, 7500), 2),
-            'dix': round(random.uniform(38, 52), 2),
-            'dix_raw': round(random.uniform(0.38, 0.52), 4),
-            'gex': random.uniform(2e9, 5e9),
-        }
-
-    def _get_mock_dix(self) -> float:
-        import random
-        return round(random.uniform(40.0, 55.0), 2)
-
-    def _get_mock_gamma_profile(self) -> Dict[str, Any]:
-        import random
-        return {
-            'total_gex': random.uniform(2e9, 5e9),
-            'timestamp': 'mock',
-        }
-
-
-def create_squeezemetrics_fetcher(mock_mode: bool = False) -> SqueezeMetricsFetcher:
-    return SqueezeMetricsFetcher(mock_mode=mock_mode)
+def create_squeezemetrics_fetcher() -> SqueezeMetricsFetcher:
+    return SqueezeMetricsFetcher()

@@ -51,10 +51,9 @@ class DBMFFetcher:
 
     SYMBOL = "DBMF"
 
-    def __init__(self, mock_mode: bool = False):
-        self.mock_mode = mock_mode
+    def __init__(self):
         self._ticker = None
-        logger.info(f"DBMFFetcher初始化完成 (mock_mode={mock_mode}, backend=yfinance)")
+        logger.info(f"DBMFFetcher初始化完成 (live mode, backend=yfinance)")
 
     def _get_ticker(self):
         """懒加载 yfinance Ticker"""
@@ -69,9 +68,6 @@ class DBMFFetcher:
         Returns:
             float: DBMF实时价格，失败时返回None
         """
-        if self.mock_mode:
-            return self._get_mock_dbmf_price()
-
         try:
             ticker = self._get_ticker()
             info = ticker.info
@@ -114,9 +110,6 @@ class DBMFFetcher:
         Returns:
             list[float]: 收盘价列表（按时间顺序），失败时返回None
         """
-        if self.mock_mode:
-            return self._get_mock_dbmf_historical_prices(period)
-
         try:
             ticker = self._get_ticker()
             hist = ticker.history(period=period)
@@ -181,24 +174,5 @@ class DBMFFetcher:
             logger.error(f"MA5检测失败: {e}", exc_info=True)
             return None
 
-    # ─── mock ───
-
-    def _get_mock_dbmf_price(self) -> float:
-        import random
-        return round(random.uniform(25.0, 35.0), 2)
-
-    def _get_mock_dbmf_historical_prices(self, period: str) -> List[float]:
-        import random
-        days_map = {'1d': 1, '5d': 5, '1mo': 22, '3mo': 66, '6mo': 132, '1y': 252}
-        days = days_map.get(period, 5)
-
-        base = 30.0
-        prices = []
-        for _ in range(days):
-            base *= (1 + random.uniform(-0.02, 0.02))
-            prices.append(round(base, 2))
-        return prices
-
-
-def create_dbmf_fetcher(mock_mode: bool = False) -> DBMFFetcher:
-    return DBMFFetcher(mock_mode=mock_mode)
+def create_dbmf_fetcher() -> DBMFFetcher:
+    return DBMFFetcher()

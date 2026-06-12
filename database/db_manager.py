@@ -108,7 +108,7 @@ class DatabaseManager:
             db_dir.mkdir(parents=True, exist_ok=True)
             
             # 建立数据库连接
-            self.connection = sqlite3.connect(self.db_path)
+            self.connection = sqlite3.connect(self.db_path, check_same_thread=False)
             self.connection.row_factory = sqlite3.Row  # 支持字典式访问
             
             # 启用WAL模式提升并发性能

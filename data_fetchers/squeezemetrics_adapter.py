@@ -138,7 +138,7 @@ class SqueezeMetricsAdapter:
 
         # 延迟导入原有 fetcher (避免循环依赖)
         from data_fetchers.squeezemetrics_fetcher import SqueezeMetricsFetcher
-        self._fetcher = SqueezeMetricsFetcher(mock_mode=False)
+        self._fetcher = SqueezeMetricsFetcher()
 
         self._last_valid_hash: str = ""
         self._last_valid_date: str = ""

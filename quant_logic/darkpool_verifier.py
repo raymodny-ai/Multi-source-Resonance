@@ -12,7 +12,7 @@
 通过三个独立数据源的交叉验证,提高信号的可靠性。
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import numpy as np
 from utils.logger import getLogger
 from config.settings import Config

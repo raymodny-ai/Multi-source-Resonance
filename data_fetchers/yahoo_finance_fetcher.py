@@ -53,7 +53,6 @@ class YahooFinanceFetcher:
     做空数据: 通过 yfinance 获取
     
     Attributes:
-        mock_mode: Mock模式开关
         _vix_cache: VIX DataFrame 缓存 (避免重复下载)
     """
     
@@ -63,15 +62,9 @@ class YahooFinanceFetcher:
     _cache_ts: float = 0.0
     _CACHE_TTL_SEC: float = 300.0  # 5分钟缓存有效期
 
-    def __init__(self, mock_mode: bool = False):
-        """初始化数据获取器
-        
-        Args:
-            mock_mode: Mock模式开关，用于无网络连接时的测试
-        """
-        self.mock_mode = mock_mode
-        
-        logger.info(f"YahooFinanceFetcher初始化完成 (mock_mode={mock_mode}, vix_utils={'✓' if _VIX_UTILS_AVAILABLE else '✗'})")
+    def __init__(self):
+        """初始化数据获取器"""
+        logger.info(f"YahooFinanceFetcher初始化完成 (live mode, vix_utils={'✓' if _VIX_UTILS_AVAILABLE else '✗'})")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -88,10 +81,6 @@ class YahooFinanceFetcher:
         Returns:
             float: VIX现货价格，失败时返回None
         """
-        if self.mock_mode:
-            logger.warning("Mock模式: 返回模拟VIX现货价格")
-            return self._get_mock_vix_spot()
-
         try:
             spot_df = self._load_vix_spot_data()
             if spot_df is None:
@@ -128,10 +117,6 @@ class YahooFinanceFetcher:
         Returns:
             float: 期货结算价 (Settle)，失败时返回None
         """
-        if self.mock_mode:
-            logger.warning(f"Mock模式: 返回模拟{contract}期货价格")
-            return self._get_mock_vix_futures(contract)
-
         try:
             futures_df = self._load_vix_futures_data()
             if futures_df is None:
@@ -205,35 +190,6 @@ class YahooFinanceFetcher:
         except Exception as e:
             logger.error(f"计算期限结构比率失败: {str(e)}", exc_info=True)
             return None
-    
-    def _get_mock_vix_spot(self) -> float:
-        """生成模拟VIX现货价格
-        
-        Returns:
-            float: 模拟的VIX价格（15-30范围内随机）
-        """
-        import random
-        return round(random.uniform(15.0, 30.0), 2)
-    
-    def _get_mock_vix_futures(self, contract: str) -> float:
-        """生成模拟VIX期货价格
-        
-        Args:
-            contract: 期货合约标识 ('VX1' 或 'VX2')
-            
-        Returns:
-            float: 模拟的期货价格
-        """
-        import random
-        
-        base_price = random.uniform(16.0, 28.0)
-        
-        # VX2通常比VX1略高（Contango常态）
-        if contract == 'VX2':
-            base_price += random.uniform(0.5, 2.0)
-        
-        return round(base_price, 2)
-
     # ================================================================
     # VIX 数据加载 — vix_utils 缓存层
     # ================================================================
@@ -330,10 +286,6 @@ class YahooFinanceFetcher:
             logger.warning("yfinance 库未安装, 无法获取做空数据")
             return None
         
-        if self.mock_mode:
-            logger.warning(f"Mock模式: 返回模拟 {symbol} 做空数据")
-            return self._get_mock_short_interest(symbol)
-        
         try:
             logger.info(f"获取 {symbol} 做空数据 (yfinance)")
             ticker = yf.Ticker(symbol.upper())
@@ -370,29 +322,9 @@ class YahooFinanceFetcher:
         except Exception as e:
             logger.error(f"{symbol} 做空数据获取失败: {e}")
             return None
-    
-    def _get_mock_short_interest(self, symbol: str) -> Dict[str, Any]:
-        """生成模拟做空数据"""
-        import random
-        from datetime import datetime
-        
-        return {
-            'symbol': symbol.upper(),
-            'short_pct_float': round(random.uniform(0.5, 15.0), 2),
-            'short_ratio': round(random.uniform(1.0, 8.0), 2),
-            'shares_short': random.randint(1000000, 50000000),
-            'date': datetime.now().strftime('%Y-%m-%d'),
-        }
 
 
 # 便捷函数
-def create_yahoo_finance_fetcher(mock_mode: bool = False) -> YahooFinanceFetcher:
-    """创建Yahoo Finance数据获取器实例的工厂函数
-    
-    Args:
-        mock_mode: 是否启用Mock模式
-        
-    Returns:
-        YahooFinanceFetcher: 配置好的获取器实例
-    """
-    return YahooFinanceFetcher(mock_mode=mock_mode)
+def create_yahoo_finance_fetcher() -> YahooFinanceFetcher:
+    """创建Yahoo Finance数据获取器实例的工厂函数"""
+    return YahooFinanceFetcher()

@@ -19,7 +19,7 @@ pydantic>=2.0.0
 scipy>=1.11.0
 
 # Vectorized Option Pricing (Layer 1 V2.0)
-py-vollib-vectorized>=0.1.4
+py-vollib-vectorized>=0.1.1
 
 # High-Performance Batch Processing (Layer 1 V2.0)
 polars>=0.20.0

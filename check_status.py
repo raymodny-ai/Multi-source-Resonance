@@ -67,7 +67,7 @@ except Exception as e:
 try:
     from data_fetchers.yahoo_finance_fetcher import YahooFinanceFetcher
     from data_fetchers.finra_fetcher import FINRAShortVolumeFetcher
-    yf_fetcher = YahooFinanceFetcher(mock_mode=False)
+    yf_fetcher = YahooFinanceFetcher()
     finra = FINRAShortVolumeFetcher()
     short_data = yf_fetcher.get_short_interest('SPY')
     if short_data and short_data.get('short_pct_float') is not None:
@@ -87,7 +87,7 @@ except Exception as e:
 # ─── 5. CCXT ───
 try:
     from data_fetchers.ccxt_fetcher import CCXTFetcher
-    ccxt_f = CCXTFetcher(mock_mode=False)
+    ccxt_f = CCXTFetcher()
     fr = ccxt_f.get_funding_rate('BTC/USDT')
     oi = ccxt_f.get_open_interest('BTC/USDT')
     if fr is not None:

@@ -32,13 +32,12 @@ def test_import(module_name: str, class_name: str) -> bool:
         return False
 
 
-def test_instantiation(module_name: str, class_name: str, mock_mode: bool = True) -> bool:
+def test_instantiation(module_name: str, class_name: str) -> bool:
     """测试类实例化
     
     Args:
         module_name: 模块名称
         class_name: 类名称
-        mock_mode: 是否使用Mock模式
         
     Returns:
         bool: True表示实例化成功
@@ -47,16 +46,9 @@ def test_instantiation(module_name: str, class_name: str, mock_mode: bool = True
         module = __import__(f'data_fetchers.{module_name}', fromlist=[class_name])
         cls = getattr(module, class_name)
         
-        # 检查构造函数是否支持mock_mode参数
-        import inspect
-        sig = inspect.signature(cls.__init__)
+        instance = cls()
         
-        if 'mock_mode' in sig.parameters:
-            instance = cls(mock_mode=mock_mode)
-        else:
-            instance = cls()
-        
-        print(f"✅ {module_name}: 实例化成功 (mock_mode={mock_mode})")
+        print(f"✅ {module_name}: 实例化成功")
         return True
     except Exception as e:
         print(f"❌ {module_name}: 实例化失败 - {str(e)}")
@@ -70,7 +62,7 @@ def test_tradier_fetcher() -> bool:
     try:
         from data_fetchers.tradier_fetcher import TradierFetcher
         
-        fetcher = TradierFetcher(mock_mode=True)
+        fetcher = TradierFetcher()
         
         # 测试get_option_chain
         raw_data = fetcher.get_option_chain('SPY', '2026-06-19')
@@ -110,7 +102,7 @@ def test_yahoo_finance_fetcher() -> bool:
     try:
         from data_fetchers.yahoo_finance_fetcher import YahooFinanceFetcher
         
-        fetcher = YahooFinanceFetcher(mock_mode=True)
+        fetcher = YahooFinanceFetcher()
         
         # 测试get_vix_spot
         vix_spot = fetcher.get_vix_spot()
@@ -150,7 +142,7 @@ def test_ccxt_fetcher() -> bool:
     try:
         from data_fetchers.ccxt_fetcher import CCXTFetcher
         
-        fetcher = CCXTFetcher(mock_mode=True)
+        fetcher = CCXTFetcher()
         
         # 测试get_funding_rate
         funding_rate = fetcher.get_funding_rate('BTC/USDT')
@@ -195,7 +187,7 @@ def test_squeezemetrics_fetcher() -> bool:
     try:
         from data_fetchers.squeezemetrics_fetcher import SqueezeMetricsFetcher
         
-        fetcher = SqueezeMetricsFetcher(mock_mode=True)
+        fetcher = SqueezeMetricsFetcher()
         
         # 测试get_daily_dix
         dix = fetcher.get_daily_dix()
@@ -234,7 +226,7 @@ def test_axlfi_fetcher() -> bool:
     try:
         from data_fetchers.axlfi_fetcher import AxlfiFetcher
         
-        fetcher = AxlfiFetcher(mock_mode=True)
+        fetcher = AxlfiFetcher()
         
         # 测试 fetch_symbol_data
         raw_data = fetcher.fetch_symbol_data('SPY', window=252)
@@ -302,7 +294,7 @@ def test_dbmf_fetcher() -> bool:
     try:
         from data_fetchers.dbmf_fetcher import DBMFFetcher
         
-        fetcher = DBMFFetcher(mock_mode=True)
+        fetcher = DBMFFetcher()
         
         # 测试get_dbmf_intraday_price
         price = fetcher.get_dbmf_intraday_price()
@@ -365,7 +357,7 @@ def main():
     
     instantiation_results = []
     for module_name, class_name in modules:
-        result = test_instantiation(module_name, class_name, mock_mode=True)
+        result = test_instantiation(module_name, class_name)
         instantiation_results.append(result)
     
     # 测试功能

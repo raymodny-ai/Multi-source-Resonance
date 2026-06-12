@@ -9,7 +9,6 @@
 - 解析 ShortVolume / TotalVolume 字段
 - 计算 Off-Exchange Short Ratio (st/rt * 100)
 - 检测连续N日短卖比超过阈值
-- 内置Mock模式用于测试
 
 数据来源: https://cdn.finra.org/equity/regsho/daily/CNMSshvol{YYYYMMDD}.txt
 文件格式: Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market
@@ -42,17 +41,11 @@ class FINRAFetcher:
     
     Attributes:
         session: requests会话对象
-        mock_mode: Mock模式开关
         base_url: FINRA CDN 文件基础URL模板
     """
     
-    def __init__(self, mock_mode: bool = False):
-        """初始化FINRA数据获取器
-        
-        Args:
-            mock_mode: Mock模式开关，用于无网络连接时的测试
-        """
-        self.mock_mode = mock_mode
+    def __init__(self):
+        """初始化FINRA数据获取器"""
         self.base_url = DataFetchConfig.FINRA_SHORT_VOLUME_URL
         
         # 创建会话对象
@@ -63,7 +56,7 @@ class FINRAFetcher:
             'Accept': 'text/plain, */*',
         })
         
-        logger.info(f"FINRAFetcher初始化完成 (mock_mode={mock_mode})")
+        logger.info(f"FINRAFetcher初始化完成 (live mode)")
     
     def _get_date_str(self, target_date: Optional[date] = None, try_previous: bool = True) -> Optional[str]:
         """获取有效的FINRA文件日期字符串
@@ -134,10 +127,6 @@ class FINRAFetcher:
             >>> if data:
             ...     print(f"SPY短卖比例: {data['short_ratio']:.2f}%")
         """
-        if self.mock_mode:
-            logger.warning(f"Mock模式: 返回模拟{symbol}卖空数据")
-            return self._get_mock_short_volume_data(symbol)
-        
         # 获取有效日期字符串
         date_str = self._get_date_str()
         if not date_str:
@@ -181,8 +170,8 @@ class FINRAFetcher:
                 file_symbol = parts[1].strip()
                 if file_symbol == symbol_upper:
                     try:
-                        short_vol = int(parts[2])
-                        total_vol = int(parts[4])
+                        short_vol = int(float(parts[2]))
+                        total_vol = int(float(parts[4]))
                         total_short += short_vol
                         total_volume += total_vol
                     except (ValueError, IndexError):
@@ -331,48 +320,11 @@ class FINRAFetcher:
             logger.error(f"检测连续天数失败: {str(e)}", exc_info=True)
             return False
     
-    def _get_mock_short_volume_data(self, symbol: str) -> Dict[str, Any]:
-        """生成模拟卖空数据
-        
-        Args:
-            symbol: 标的股票代码
-            
-        Returns:
-            dict: 模拟的卖空数据结构
-        """
-        import random
-        
-        today = datetime.now()
-        
-        # 模拟合理成交量 (SPY日均约5-8千万, QQQ约2-4千万)
-        if symbol.upper() in ('SPY', 'SPX'):
-            total_volume = random.randint(50000000, 80000000)
-        elif symbol.upper() in ('QQQ', 'IWM'):
-            total_volume = random.randint(20000000, 40000000)
-        else:
-            total_volume = random.randint(5000000, 20000000)
-        
-        # 短卖比在40-55%之间波动(正常范围)
-        short_ratio = random.uniform(40.0, 55.0)
-        short_volume = int(total_volume * short_ratio / 100)
-        
-        return {
-            'date': today.strftime('%Y-%m-%d'),
-            'symbol': symbol.upper(),
-            'short_volume': short_volume,
-            'total_volume': total_volume,
-            'short_ratio': round(short_ratio, 2),
-        }
-
-
 # 便捷函数
-def create_finra_fetcher(mock_mode: bool = False) -> FINRAFetcher:
+def create_finra_fetcher() -> FINRAFetcher:
     """创建FINRA数据获取器实例的工厂函数
     
-    Args:
-        mock_mode: 是否启用Mock模式
-        
     Returns:
         FINRAFetcher: 配置好的获取器实例
     """
-    return FINRAFetcher(mock_mode=mock_mode)
+    return FINRAFetcher()

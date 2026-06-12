@@ -33,15 +33,14 @@ class AxlfiFetcher:
     API 公开无需 API Key，默认 252 天窗口。
     """
 
-    def __init__(self, mock_mode: bool = False):
-        self.mock_mode = mock_mode
+    def __init__(self):
         self.base_url = BASE_URL
         self.session = requests.Session()
         self.session.headers.update({
             'Accept': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
-        logger.info(f"AxlfiFetcher 初始化 (mock_mode={mock_mode})")
+        logger.info(f"AxlfiFetcher 初始化 (live mode)")
 
     def fetch_symbol_data(self, symbol: str = 'SPY', window: int = 252) -> Optional[Dict[str, Any]]:
         """获取单个标的的暗盘和卖空数据
@@ -54,9 +53,6 @@ class AxlfiFetcher:
             dict with keys: dates, dollar_dp_position, dollar_net_volume,
                             net_volume, short_volume, short_volume_pct, prices
         """
-        if self.mock_mode:
-            return self._mock_symbol_data(symbol, window)
-
         try:
             url = f"{self.base_url}/dark_pools/symbol?symbol={symbol}&window={window}"
             r = self.session.get(url, timeout=15)
@@ -112,9 +108,6 @@ class AxlfiFetcher:
             sort: asc/desc
             limit: 返回数量
         """
-        if self.mock_mode:
-            return self._mock_leaderboard()
-
         try:
             url = f"{self.base_url}/dark_pools/leaderboard?metric={metric}&sort={sort}&limit={limit}"
             r = self.session.get(url, timeout=15)
@@ -196,32 +189,5 @@ class AxlfiFetcher:
             'latest_short_volume': data.get('short_volume', [0])[-1] if data.get('short_volume') else 0,
         }
 
-    # ==================== Mock ====================
-    def _mock_symbol_data(self, symbol: str, window: int) -> Dict[str, Any]:
-        import random
-        dates = [(datetime.now().date().isoformat()) for _ in range(window)]
-        base = random.uniform(-2e9, -1e9)
-        trend = random.uniform(5e6, 20e6)
-        dp = [round(base + trend * i + random.uniform(-5e7, 5e7), 0) for i in range(window)]
-        prices = [round(500 + 0.05 * i + random.uniform(-3, 3), 2) for i in range(window)]
-        return {
-            'symbol': symbol,
-            'as_of_date': dates[-1],
-            'latest': {'dollar_dp_position': str(dp[-1])},
-            'dates': dates,
-            'dollar_dp_position': dp,
-            'dollar_net_volume': [v * 0.5 for v in dp],
-            'short_volume_pct': [round(random.uniform(40, 65), 2) for _ in range(window)],
-            'close': prices,
-        }
-
-    def _mock_leaderboard(self) -> List[Dict]:
-        return [
-            {'ticker': 'QQQ', 'dollar_dp_position': 3.4e10, 'short_volume_percent': 59.3},
-            {'ticker': 'SPY', 'dollar_dp_position': -1.4e9, 'short_volume_percent': 52.1},
-            {'ticker': 'IWM', 'dollar_dp_position': -8.2e8, 'short_volume_percent': 48.7},
-        ]
-
-
-def create_axlfi_fetcher(mock_mode: bool = False) -> AxlfiFetcher:
-    return AxlfiFetcher(mock_mode=mock_mode)
+def create_axlfi_fetcher() -> AxlfiFetcher:
+    return AxlfiFetcher()

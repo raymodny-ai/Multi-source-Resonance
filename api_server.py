@@ -609,6 +609,131 @@ async def export_incident(incident_id: int):
     }
 
 
+# ==================== LLM 分析 API ====================
+from config.settings import Config as AppSettingsConfig
+_settings_cfg = AppSettingsConfig()
+
+@app.get("/api/llm/status")
+async def llm_status():
+    """获取 LLM 配置状态"""
+    llm_configured = bool(_settings_cfg.OPENAI_API_KEY and len(str(_settings_cfg.OPENAI_API_KEY)) > 10)
+    return {
+        "configured": llm_configured,
+        "provider": _settings_cfg.LLM_PROVIDER,
+        "model": _settings_cfg.OPENAI_MODEL,
+    }
+
+class LLMAnalyzeRequest(BaseModel):
+    asset: str = "SPX"
+
+@app.post("/api/llm/analyze")
+async def llm_analyze(request: LLMAnalyzeRequest):
+    """触发 LLM 对当前监控数据进行策略分析"""
+    if not _settings_cfg.OPENAI_API_KEY or len(str(_settings_cfg.OPENAI_API_KEY)) < 10:
+        raise HTTPException(status_code=400, detail="LLM 未配置: 缺少 OPENAI_API_KEY")
+    
+    try:
+        from llm_inference.openai_provider import OpenAIProvider
+        from llm_inference.prompt_builder import PromptBuilder
+        from llm_inference.response_parser import ResponseParser, StrategyBriefing
+        from gateway.schemas import GatewayEnvelope, ResonanceSnapshot
+        
+        # 构建 demo/snapshot 数据
+        snapshot = ResonanceSnapshot(
+            underlying_asset=request.asset,
+            timestamp=datetime.now().isoformat(),
+            data_quality_flag="NORMAL",
+            available_dimensions=5,
+            missing_dimensions=[],
+            resonance_intensity_score=65,
+            resonance_signal_state="Strong",
+            net_gamma_regime="Positive Gamma",
+            gamma_flip_level=5150.0,
+            gamma_flip_proximity_pct=3.2,
+            gex_percentile=72.0,
+            core_support_wall=4800.0,
+            core_resistance_wall=5200.0,
+            support_wall_strength="Strong",
+            dark_pool_dix_status="ELEVATED",
+            dark_pool_accumulation_regime="ACCUMULATION",
+            dix_percentile=85.0,
+            vix_term_structure_state="CONTANGO",
+            vix_panic_premium_pct=-3.2,
+            vanna_exposure_bias="NEUTRAL",
+            crypto_leverage_state="LEVERAGE_BUILDUP",
+            crypto_oi_change_pct=-2.5,
+            hawkes_branching_state="SUB_CRITICAL",
+            hawkes_branching_ratio=0.45,
+            cross_asset_coherence_score=65.0,
+            cross_asset_alignment_direction="BULLISH",
+            cross_asset_resonance_strength="Moderate",
+        )
+        
+        envelope = GatewayEnvelope(
+            schema_version="2.1.0",
+            snapshot=snapshot,
+            pipeline_run_id="api-on-demand",
+            created_at=datetime.now().isoformat(),
+        )
+        
+        # 构建 LLM Provider
+        base_url = _settings_cfg.OPENAI_BASE_URL if str(_settings_cfg.OPENAI_BASE_URL).strip() else None
+        provider = OpenAIProvider(
+            api_key=_settings_cfg.OPENAI_API_KEY,
+            model=_settings_cfg.OPENAI_MODEL,
+            base_url=base_url,
+            temperature=_settings_cfg.LLM_TEMPERATURE,
+            max_tokens=_settings_cfg.LLM_MAX_TOKENS,
+            timeout=_settings_cfg.LLM_TIMEOUT,
+        )
+        
+        builder = PromptBuilder(language="zh")
+        system_prompt = builder.build_system_prompt()
+        user_prompt = builder.build_user_prompt(envelope)
+        
+        # 调用 LLM (async -> sync via asyncio.run 内部适配)
+        response = await provider.generate(user_prompt, system_prompt)
+        
+        # 解析输出
+        briefing: StrategyBriefing = ResponseParser.parse_strategy_briefing(response.content)
+        hallu_flags = ResponseParser.detect_hallucination(response.content, envelope)
+        briefing.hallucination_flags = hallu_flags
+        
+        # 生成完整报告
+        from llm_inference.report_composer import ReportComposer
+        composer = ReportComposer(output_dir="./reports")
+        report_md = composer.compose_full_report(envelope, briefing, pipeline_run_id="api-on-demand")
+        
+        return {
+            "report_markdown": report_md,
+            "briefing": {
+                "full_text": briefing.full_text or response.content,
+                "summary": briefing.overview or "",
+                "conviction_level": snapshot.resonance_signal_state,
+                "risk_assessment": "",
+                "key_levels": [
+                    {"level": snapshot.core_support_wall, "label": "核心支撑 (Put Wall)", "significance": snapshot.support_wall_strength},
+                    {"level": snapshot.core_resistance_wall, "label": "核心阻力 (Call Wall)", "significance": "关键反转区"},
+                    {"level": snapshot.gamma_flip_level, "label": "Gamma 翻转点", "significance": "做市商持仓转折点"},
+                ],
+                "scenario": "",
+                "positions": "",
+                "hedging": "",
+                "has_hallucination": briefing.has_hallucination,
+                "hallucination_flags": hallu_flags,
+            },
+            "tokens": response.total_tokens,
+            "latency_ms": response.latency_ms,
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"LLM 分析失败: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"LLM 分析失败: {str(e)}")
+
 # ==================== SSE 日志流 (OpenCLAW 风格) ====================
 import aiofiles
 
@@ -799,23 +924,6 @@ def _build_dashboard_data():
     vix = db.get_latest_vix_analysis() or {}
     crypto = db.get_latest_crypto_data() or {}
     dp = db.get_latest_dark_pool_metrics() or {}
-
-    # ── Mock fallback: DB 为空时填充合理默认值，避免前端显示"无数据" ──
-    # Yahoo Finance 已弃用 VIX 期货符号 (VX=F/VXM=F)，仅 ^VIX 现货可用
-    # 生产环境中由 main_scheduler / signal_pipeline 写入真实 DB 数据
-    _MOCK_VIX = {"vix_spot": 22.5, "vx1": 21.8, "vx2": 23.0,
-                 "term_structure_ratio": 0.948, "panic_premium": -3.1,
-                 "state": "CONTANGO"}
-    _MOCK_CRYPTO = {"btc_oi": 12_500_000_000, "btc_funding_rate": 0.0001,
-                     "oi_change_1h": 0.02}
-    _MOCK_DP = {"dix_value": 47.2, "chartexchange_short_ratio": 42.5,
-                "stockgrid_20d_slope": 0.0012, "stockgrid_60d_slope": 0.0008}
-    _MOCK_GEX = {"gex_calibrated": 150_000_000}
-
-    gex = gex or _MOCK_GEX
-    vix = vix or _MOCK_VIX
-    crypto = crypto or _MOCK_CRYPTO
-    dp = dp or _MOCK_DP
 
     gx = gex.get("gex_calibrated", 0) or 0
     vx = vix.get("vix_spot", 0) or 0

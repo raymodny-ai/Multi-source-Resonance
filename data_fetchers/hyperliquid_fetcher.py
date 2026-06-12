@@ -45,7 +45,6 @@ class HyperliquidFetcher:
 
     Attributes:
         session: requests 会话对象
-        mock_mode: Mock 模式开关
         BASE_URL: API 基础地址
         _universe_cache: 缓存 universe 映射 (coin_name → index)
         _cache_ts: 缓存时间戳
@@ -54,13 +53,7 @@ class HyperliquidFetcher:
     BASE_URL = "https://api.hyperliquid.xyz/info"
     CACHE_TTL_SECONDS = 60  # universe 映射缓存 60 秒
 
-    def __init__(self, mock_mode: bool = False):
-        """初始化 Hyperliquid 数据获取器
-
-        Args:
-            mock_mode: Mock 模式开关，用于无网络连接时的测试
-        """
-        self.mock_mode = mock_mode
+    def __init__(self):
         self._universe_cache: Optional[Dict[str, int]] = None
         self._cache_ts: Optional[datetime] = None
 
@@ -70,7 +63,7 @@ class HyperliquidFetcher:
             'User-Agent': 'MultiSourceResonance/1.0',
         })
 
-        logger.info(f"HyperliquidFetcher 初始化完成 (mock_mode={mock_mode})")
+        logger.info(f"HyperliquidFetcher 初始化完成 (live mode)")
 
     def _normalize_symbol(self, symbol: str) -> str:
         """标准化交易对符号 → Hyperliquid coin name
@@ -182,9 +175,6 @@ class HyperliquidFetcher:
             >>> if rate is not None:
             ...     print(f"DEX资金费率: {rate*100:.4f}%")
         """
-        if self.mock_mode:
-            return self._mock_funding_rate()
-
         coin = self._normalize_symbol(symbol)
 
         try:
@@ -245,9 +235,6 @@ class HyperliquidFetcher:
             >>> if oi:
             ...     print(f"DEX OI: ${oi['oi']:,.0f}")
         """
-        if self.mock_mode:
-            return self._mock_open_interest()
-
         coin = self._normalize_symbol(symbol)
 
         try:
@@ -310,9 +297,6 @@ class HyperliquidFetcher:
         Returns:
             list: 空列表 (Hyperliquid 不提供清算数据)
         """
-        if self.mock_mode:
-            return self._mock_liquidation_data(limit)
-
         logger.debug("Hyperliquid 不提供清算历史数据，返回空列表")
         return []
 
@@ -361,50 +345,11 @@ class HyperliquidFetcher:
             logger.error(f"计算 OI 变化率失败: {e}", exc_info=True)
             return None
 
-    # ---- Mock 数据方法 ----
-
-    def _mock_funding_rate(self) -> float:
-        """生成模拟资金费率"""
-        import random
-        return round(random.uniform(-0.001, 0.001), 6)
-
-    def _mock_open_interest(self) -> Dict[str, Any]:
-        """生成模拟持仓量"""
-        import random
-        oi_base = round(random.uniform(25000, 40000), 2)
-        mark_px = round(random.uniform(55000, 75000), 2)
-        return {
-            'oi': round(oi_base * mark_px, 2),
-            'oi_base': oi_base,
-            'mark_price': mark_px,
-            'timestamp': datetime.now(),
-        }
-
-    def _mock_liquidation_data(self, limit: int) -> List[Dict[str, Any]]:
-        """生成模拟清算数据"""
-        import random
-        data = []
-        for i in range(limit):
-            ts = datetime.now() - timedelta(hours=i)
-            long_liq = random.uniform(1_000_000, 50_000_000)
-            short_liq = random.uniform(1_000_000, 50_000_000)
-            data.append({
-                'timestamp': ts,
-                'long_liquidation': long_liq,
-                'short_liquidation': short_liq,
-                'total_liquidation': long_liq + short_liq,
-            })
-        return data
-
-
 # 便捷函数
-def create_hyperliquid_fetcher(mock_mode: bool = False) -> HyperliquidFetcher:
+def create_hyperliquid_fetcher() -> HyperliquidFetcher:
     """创建 Hyperliquid 数据获取器实例
-
-    Args:
-        mock_mode: 是否启用 Mock 模式
 
     Returns:
         HyperliquidFetcher: 配置好的获取器实例
     """
-    return HyperliquidFetcher(mock_mode=mock_mode)
+    return HyperliquidFetcher()

@@ -9,7 +9,6 @@
 - 获取全网聚合持仓量 (Aggregated Open Interest)
 - 获取清算热力图数据 (Liquidation Heatmap)
 - 计算1小时OI变化率用于判断去杠杆进度
-- 内置Mock模式,无API密钥时自动降级
 
 API文档: https://coinglass.github.io/API-Reference/
 Base URL: https://open-api-v4.coinglass.com
@@ -43,7 +42,6 @@ class CoinglassFetcher:
         api_key: Coinglass API密钥
         base_url: API基础URL
         session: requests会话对象
-        mock_mode: Mock模式开关 (无API密钥时自动启用)
     """
     
     # 币种映射: CCXT格式 → Coinglass格式
@@ -56,18 +54,14 @@ class CoinglassFetcher:
         'ETH': 'ETH',
     }
     
-    def __init__(self, api_key: Optional[str] = None, mock_mode: bool = False):
+    def __init__(self, api_key: Optional[str] = None):
         """初始化Coinglass数据获取器
         
         Args:
             api_key: Coinglass API密钥，默认从Config读取
-            mock_mode: Mock模式开关，无API密钥时自动启用
         """
         self.api_key = api_key or Config.COINGLASS_API_KEY
         self.base_url = Config.COINGLASS_BASE_URL
-        
-        # 无API密钥时自动降级为Mock模式
-        self.mock_mode = mock_mode or not self.api_key
         
         self.session = requests.Session()
         self.session.headers.update({
@@ -78,8 +72,10 @@ class CoinglassFetcher:
         if self.api_key:
             self.session.headers['CG-API-KEY'] = self.api_key
         
-        mode_desc = 'mock (无API密钥)' if self.mock_mode else 'live'
-        logger.info(f"CoinglassFetcher初始化完成 (mode={mode_desc})")
+        if not self.api_key:
+            logger.error("CoinglassFetcher: API Key 未配置，数据源不可用")
+        else:
+            logger.info("CoinglassFetcher初始化完成 (live mode)")
     
     def _normalize_symbol(self, symbol: str) -> str:
         """将CCXT格式的交易对转换为Coinglass格式
@@ -123,10 +119,10 @@ class CoinglassFetcher:
             ...     if rate < -0.0001:
             ...         print("全网看跌情绪浓厚")
         """
-        if self.mock_mode:
-            logger.warning(f"Mock模式: 返回模拟{symbol}资金费率")
-            return self._get_mock_funding_rate(symbol)
-        
+        if not self.api_key:
+            logger.error("Coinglass: 无 API Key，无法获取资金费率")
+            return None
+
         coin = self._normalize_symbol(symbol)
         url = f"{self.base_url}/api/futures/fundingRate/current"
         
@@ -216,10 +212,10 @@ class CoinglassFetcher:
             >>> if oi_data:
             ...     print(f"全网持仓量: ${oi_data['oi']:,.0f}")
         """
-        if self.mock_mode:
-            logger.warning(f"Mock模式: 返回模拟{symbol}持仓量")
-            return self._get_mock_open_interest(symbol)
-        
+        if not self.api_key:
+            logger.error("Coinglass: 无 API Key，无法获取 OI")
+            return None
+
         coin = self._normalize_symbol(symbol)
         
         # 使用 OHLC history 端点获取最新OI (取最近1条)
@@ -291,9 +287,10 @@ class CoinglassFetcher:
                 - 'total_liquidation': 总清算量(USD)
             失败时返回None
         """
-        if self.mock_mode:
-            return self._get_mock_liquidation_data(limit)
-        
+        if not self.api_key:
+            logger.error("Coinglass: 无 API Key，无法获取清算数据")
+            return None
+
         coin = self._normalize_symbol(symbol)
         url = f"{self.base_url}/api/futures/liquidation/aggregated-history"
         
@@ -393,50 +390,14 @@ class CoinglassFetcher:
             logger.error(f"计算OI变化率失败: {str(e)}", exc_info=True)
             return None
     
-    def _get_mock_funding_rate(self, symbol: str) -> float:
-        """生成模拟资金费率"""
-        import random
-        return round(random.uniform(-0.001, 0.001), 6)
-    
-    def _get_mock_open_interest(self, symbol: str) -> Dict[str, Any]:
-        """生成模拟持仓量数据"""
-        import random
-        
-        # BTC全网OI通常在100-300亿美元
-        oi_value = round(random.uniform(10_000_000_000, 30_000_000_000), 2)
-        
-        return {
-            'oi': oi_value,
-            'timestamp': datetime.now()
-        }
-    
-    def _get_mock_liquidation_data(self, limit: int) -> List[Dict[str, Any]]:
-        """生成模拟清算数据"""
-        import random
-        
-        data = []
-        for i in range(limit):
-            ts = datetime.now() - timedelta(hours=i)
-            long_liq = random.uniform(1_000_000, 50_000_000)
-            short_liq = random.uniform(1_000_000, 50_000_000)
-            data.append({
-                'timestamp': ts,
-                'long_liquidation': long_liq,
-                'short_liquidation': short_liq,
-                'total_liquidation': long_liq + short_liq,
-            })
-        return data
-
-
 # 便捷函数
-def create_coinglass_fetcher(mock_mode: bool = False, api_key: Optional[str] = None) -> CoinglassFetcher:
+def create_coinglass_fetcher(api_key: Optional[str] = None) -> CoinglassFetcher:
     """创建Coinglass数据获取器实例的工厂函数
     
     Args:
-        mock_mode: 是否启用Mock模式
         api_key: Coinglass API密钥（可选，默认从config读取）
         
     Returns:
         CoinglassFetcher: 配置好的获取器实例
     """
-    return CoinglassFetcher(mock_mode=mock_mode, api_key=api_key)
+    return CoinglassFetcher(api_key=api_key)

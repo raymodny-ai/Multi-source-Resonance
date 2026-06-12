@@ -34,7 +34,7 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
-    logger.warning("Playwright未安装，StockgridFetcher将仅支持Mock模式")
+    logger.warning("Playwright未安装，StockgridFetcher将返回空数据")
 
 
 class PlaywrightManager:
@@ -171,7 +171,6 @@ class StockgridFetcher:
     暗盘大宗交易累积净头寸数据（20/60/120日周期）。
     
     Attributes:
-        mock_mode: Mock模式开关
         browser_manager: Playwright浏览器管理器单例
         base_url: Stockgrid网站基础URL
         selectors: CSS选择器配置字典（外置以便维护）
@@ -188,17 +187,12 @@ class StockgridFetcher:
         'error_message': '.error-message, .alert-danger',
     }
     
-    def __init__(self, mock_mode: bool = False):
-        """初始化Stockgrid数据获取器
-        
-        Args:
-            mock_mode: Mock模式开关，用于无Playwright或测试环境
-        """
-        self.mock_mode = mock_mode
+    def __init__(self):
+        """初始化Stockgrid数据获取器"""
         self.browser_manager = PlaywrightManager()
         self.base_url = "https://stockgrid.io"
         
-        logger.info(f"StockgridFetcher初始化完成 (mock_mode={mock_mode})")
+        logger.info(f"StockgridFetcher初始化完成 (live mode)")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -245,10 +239,6 @@ class StockgridFetcher:
             >>> if data:
             ...     print(f"20日净头寸序列长度: {len(data['20d'])}")
         """
-        if self.mock_mode:
-            logger.warning(f"Mock模式: 返回模拟{symbol}净头寸数据")
-            return self._get_mock_net_position_history(symbol, period_days)
-        
         if not PLAYWRIGHT_AVAILABLE:
             logger.error("Playwright不可用，请安装: pip install playwright && playwright install")
             return None
@@ -542,51 +532,11 @@ class StockgridFetcher:
                 'position_trend': 'error'
             }
     
-    def _get_mock_net_position_history(
-        self, 
-        symbol: str, 
-        period_days: List[int]
-    ) -> Dict[str, List[float]]:
-        """生成模拟净头寸历史数据
-        
-        Args:
-            symbol: 标的股票代码
-            period_days: 时间周期列表
-            
-        Returns:
-            dict: 模拟的各周期净头寸序列
-        """
-        import random
-        
-        result = {}
-        
-        for period in period_days:
-            # 生成带有上升趋势的随机序列（模拟机构吸筹）
-            base_value = random.uniform(-500000000, 0)  # 初始为负值
-            trend = random.uniform(5000000, 20000000)  # 每日增长500万-2000万
-            
-            series = []
-            for i in range(period):
-                value = base_value + trend * i + random.uniform(-10000000, 10000000)
-                series.append(round(value, 0))
-            
-            result[f'{period}d'] = series
-        
-        return result
-    
-    async def cleanup(self):
-        """清理资源（关闭浏览器）"""
-        await self.browser_manager.close()
-
-
 # 便捷函数
-def create_stockgrid_fetcher(mock_mode: bool = False) -> StockgridFetcher:
+def create_stockgrid_fetcher() -> StockgridFetcher:
     """创建Stockgrid数据获取器实例的工厂函数
     
-    Args:
-        mock_mode: 是否启用Mock模式
-        
     Returns:
         StockgridFetcher: 配置好的获取器实例
     """
-    return StockgridFetcher(mock_mode=mock_mode)
+    return StockgridFetcher()

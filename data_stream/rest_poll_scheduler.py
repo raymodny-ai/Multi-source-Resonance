@@ -445,7 +445,7 @@ class RESTPollScheduler:
                 )
                 historical_prices = await loop.run_in_executor(
                     self._executor,
-                    lambda: self._dbmf.get_dbmf_historical_prices(days=10),
+                    lambda: self._dbmf.get_dbmf_historical_prices(period="10d"),
                 )
 
                 if current_price and historical_prices:
@@ -613,6 +613,8 @@ class RESTPollScheduler:
 
     async def _poll_gex_dix_once(self):
         """单次 GEX/DIX 采集 (忽略市场时间)"""
+        if self._squeezemetrics is None:
+            return
         loop = asyncio.get_event_loop()
         metrics = await loop.run_in_executor(
             self._executor, self._squeezemetrics.get_full_metrics
@@ -685,7 +687,7 @@ class RESTPollScheduler:
         loop = asyncio.get_event_loop()
         current_price = await loop.run_in_executor(self._executor, self._dbmf.get_dbmf_intraday_price)
         historical_prices = await loop.run_in_executor(
-            self._executor, lambda: self._dbmf.get_dbmf_historical_prices(days=10)
+            self._executor, lambda: self._dbmf.get_dbmf_historical_prices(period="10d")
         )
         if current_price and historical_prices:
             recovery = await loop.run_in_executor(
