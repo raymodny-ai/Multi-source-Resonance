@@ -36,7 +36,7 @@ logger = logging.getLogger("api_server")
 _START_TIME = time.time()
 
 # ═══════════════════════════════════════════════════════════════
-# 全局状态: 手动采集模式 (自动轮询已永久禁用)
+# 全局状态: 每日批量采集模式 (盘中高频轮询已移除)
 # ═══════════════════════════════════════════════════════════════
 
 # 采集引擎组件 (app 启动时初始化)
@@ -349,15 +349,15 @@ class AutoPollingRequest(BaseModel):
 
 @app.get("/api/system/auto-polling")
 async def get_auto_polling():
-    """获取自动轮询开关状态 — 已永久禁用"""
-    return {"enabled": False, "mode": "manual_only"}
+    """获取自动采集调度状态 — 盘中轮询已移除，统一为每日 ET 20:00 批量模式"""
+    return {"enabled": False, "mode": "daily_batch", "batch_time": "20:00 ET"}
 
 
 @app.put("/api/system/auto-polling")
 async def set_auto_polling(req: AutoPollingRequest):
-    """设置自动轮询开关 — 已永久禁用，此端点仅返回当前状态"""
-    logger.info("[AUTO_POLLING] 自动轮询已永久禁用，忽略切换请求 (requested=%s)", req.enabled)
-    return {"ok": True, "enabled": False, "mode": "manual_only", "message": "自动轮询已永久禁用，请使用手动采集"}
+    """设置自动采集调度 — 盘中轮询已移除，统一为每日 ET 20:00 批量模式"""
+    logger.info("[AUTO_POLLING] 盘中轮询已移除, 统一为每日批量模式 (requested=%s)", req.enabled)
+    return {"ok": True, "enabled": False, "mode": "daily_batch", "message": "盘中轮询已移除，系统使用每日美东 20:00 批量采集"}
 
 
 @app.post("/api/system/collect-manual")
@@ -805,13 +805,15 @@ async def logs_stream():
 async def startup_event():
     """启动采集引擎的后台评分组件 (EventBus + SignalPipeline)
     
-    ⚠ 不启动任何自动轮询任务 — 数据获取仅通过手动触发。
-    EventBus 和 SignalPipeline 在后台运行，用于接收手动采集的数据并评分入库。
+    ⚠ 不启动自动轮询 — 数据获取通过以下方式触发:
+      1. 每日定时批量采集 (main_stream.py / StreamEngine, 美东 20:00)
+      2. 前端手动采集 (POST /api/system/collect-manual)
+    EventBus 和 SignalPipeline 在后台运行，用于接收数据并评分入库。
     """
     global _event_bus, _signal_pipeline, _rest_scheduler
 
     logger.info("=" * 54)
-    logger.info("  多源共振监控系统 API 服务器 v2.2 (手动采集模式)")
+    logger.info("  多源共振监控系统 API 服务器 v2.2 (每日批量+手动采集)")
     logger.info("=" * 54)
 
     try:
@@ -836,13 +838,13 @@ async def startup_event():
         await _signal_pipeline.start()
         logger.info("  ✓ SignalPipeline 已启动 (评分引擎就绪)")
 
-        # 6. RESTPollScheduler 初始化但不启动自动轮询
+        # 6. RESTPollScheduler 初始化 (每日批量采集由 main_stream.py 启动)
         #    手动采集通过 run_once_manual_collect() 触发
         _rest_scheduler._load_fetchers()
-        logger.info("  ✓ RESTPollScheduler 已就绪 (6 数据源, 手动触发)")
+        logger.info("  ✓ RESTPollScheduler 已就绪 (6 数据源, 每日批量 + 手动触发)")
 
         logger.info("-" * 54)
-        logger.info("  ⚠ 自动轮询已永久禁用 — 请通过前端手动触发数据采集")
+        logger.info("  ⚠ 盘中轮询已移除 — 使用每日美东 20:00 批量采集 + 手动触发")
         logger.info("  API: http://localhost:8524")
         logger.info("  前端: http://localhost:8524 → 系统状态监控 → 手动采集全部数据")
         logger.info("=" * 54)

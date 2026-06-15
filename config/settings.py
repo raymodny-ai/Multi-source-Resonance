@@ -107,17 +107,20 @@ class Config:
     # Discord Webhook配置 (可选)
     DISCORD_WEBHOOK_URL: str = os.getenv('DISCORD_WEBHOOK_URL', '')
     
-    # ==================== 抓取频率配置 (已弃用 Pull 模式, 保留兼容) ====================
-    # Push 架构已启用: WebSocket + EventBus 替代定时轮询
-    # 这些配置仅在 RESTPollScheduler 中作为轮询间隔使用
+    # ==================== 抓取频率配置 (每日定时批量模式) ====================
+    # v2.2: 盘中高频轮询已移除。系统现为每日单次批量采集模式，
+    # 每天美东 20:00 统一拉取全部 6 数据源并触发共振评分。
     
-    # 盘中监控频率 (秒)
-    INTRADAY_FETCH_INTERVAL: int = 900  # 15分钟 = 900秒 (deprecated: RESTPollScheduler 使用)
+    # 每日批量采集时间 (美东)
+    DAILY_BATCH_TIME: tuple = (20, 0)  # 20:00 ET
     
-    # 盘后监控时间点 (小时, 分钟)
-    AFTER_HOURS_FETCH_TIME: tuple = (20, 30)  # 20:30 (deprecated)
+    # 盘中监控频率 (秒) — [DEPRECATED] 盘中轮询已停用
+    INTRADAY_FETCH_INTERVAL: int = 900  # deprecated: 盘中15分钟轮询已移除
     
-    # 开盘前准备时间 (分钟)
+    # 盘后监控时间点 (小时, 分钟) — [DEPRECATED] 已统一为 DAILY_BATCH_TIME
+    AFTER_HOURS_FETCH_TIME: tuple = (20, 0)  # deprecated: 统一到 DAILY_BATCH_TIME
+    
+    # 开盘前准备时间 (分钟) — [DEPRECATED]
     PRE_MARKET_PREP_MINUTES: int = 30  # deprecated
     
     # ==================== 信号阈值配置 ====================
@@ -328,28 +331,24 @@ class Config:
     
     @classmethod
     def get_next_fetch_time(cls) -> str:
-        """计算下次抓取时间
+        """计算下次批量采集时间
+        
+        每日美东 20:00。若当前时间已过今天 20:00，返回明天 20:00。
         
         Returns:
-            str: 下次抓取的ISO格式时间字符串
+            str: 下次采集的 ISO 格式时间字符串
         """
         from datetime import datetime, timedelta
+        import pytz
         
-        now = datetime.now()
+        eastern = pytz.timezone('US/Eastern')
+        now = datetime.now(eastern)
         
-        if cls.is_market_hours():
-            # 盘中：当前时间 + 抓取间隔
-            next_time = now + timedelta(seconds=cls.INTRADAY_FETCH_INTERVAL)
-        else:
-            # 盘后：下一个交易日或指定的盘后时间
-            next_time = now.replace(
-                hour=cls.AFTER_HOURS_FETCH_TIME[0],
-                minute=cls.AFTER_HOURS_FETCH_TIME[1],
-                second=0,
-                microsecond=0
-            )
-            if next_time <= now:
-                next_time += timedelta(days=1)
+        hour, minute = cls.DAILY_BATCH_TIME
+        next_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        
+        if next_time <= now:
+            next_time += timedelta(days=1)
         
         return next_time.isoformat()
 

@@ -1,15 +1,20 @@
 """
-多源共振监控系统 - 入口文件 (手动采集模式)
+多源共振监控系统 - 入口文件 (每日定时批量采集模式)
 
-⚠️ 自动采集已完全禁用。系统现为纯手动采集模式：
-  1. 启动 api_server.py (FastAPI + 前端)
-  2. 在浏览器中打开 http://localhost:8524
-  3. 进入「系统状态监控」页面
-  4. 点击「手动采集全部数据」按钮触发一次性全量数据拉取
+⚠️ 盘中高频轮询已完全移除。系统现为每日单次批量采集模式：
+  每天美东 20:00 统一拉取全部 6 数据源 (GEX/DIX, VIX, AXLFI暗盘,
+  DBMF, 加密衍生品, 做空)，通过 EventBus 发布后由 SignalPipeline
+  消费并触发共振评分和告警推送。
+
+  手动采集仍可通过 api_server.py 前端触发：
+    1. 启动 api_server.py (FastAPI + 前端)
+    2. 在浏览器中打开 http://localhost:8524
+    3. 进入「系统状态监控」页面
+    4. 点击「手动采集全部数据」按钮
 
 使用方式:
-    py api_server.py          # 启动 API + 前端
-    # 然后在浏览器中手动触发采集
+    py main_stream.py            # 启动每日定时批量采集 + WebSocket 实时流
+    py api_server.py              # 启动 API + 前端 (含手动采集)
 """
 
 import sys
@@ -23,13 +28,20 @@ logger = getLogger('main_stream')
 
 
 def start():
-    """自动采集已禁用。请使用 api_server.py + 前端手动触发。"""
+    """启动每日定时批量采集 + WebSocket 实时流。
+    
+    盘中高频轮询已移除，所有数据源统一在美东 20:00 批量拉取。
+    Hyperliquid WebSocket 仍保持实时推送。
+    """
     logger.info("=" * 54)
-    logger.info("  ⚠ 自动数据采集已完全关闭 (手动采集模式)")
+    logger.info("  每日定时批量采集模式 (美东 20:00)")
     logger.info("=" * 54)
-    logger.info("  请启动 api_server.py 并在前端手动触发采集:")
-    logger.info("    py api_server.py")
-    logger.info("    浏览器打开 http://localhost:8524 → 系统状态监控 → 手动采集")
+    logger.info("  盘中高频轮询已移除。数据采集统一到每日 20:00 ET。")
+    logger.info("  Hyperliquid WebSocket 实时流仍保持连接。")
+    logger.info("")
+    logger.info("  启动方式:")
+    logger.info("    py main_stream.py       # 每日批量 + WebSocket")
+    logger.info("    py api_server.py         # API + 前端 + 手动采集")
     logger.info("=" * 54)
 
 

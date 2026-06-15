@@ -28,11 +28,16 @@ from config.settings import Config, DataFetchConfig
 
 logger = getLogger('rest_poll_scheduler')
 
-# 默认轮询间隔 (秒)
-POLL_INTERVAL_INTRADAY = 900    # 盘中 15分钟
-POLL_INTERVAL_CRYPTO = 60       # 加密降级轮询 1分钟
-POLL_AFTERHOURS_HOUR = 20       # 盘后任务触发小时 (美东)
-POLL_AFTERHOURS_MINUTE = 30     # 盘后任务触发分钟
+# 每日批量采集时间 (美东)
+DAILY_BATCH_HOUR = 20       # 每日美东 20:00 执行全量数据采集
+DAILY_BATCH_MINUTE = 0
+DAILY_BATCH_INTERVAL_SECONDS = 86400  # 24 小时
+
+# [DEPRECATED] 旧盘中轮询常量 (保留兼容)
+POLL_INTERVAL_INTRADAY = 900    # deprecated
+POLL_INTERVAL_CRYPTO = 60       # deprecated
+POLL_AFTERHOURS_HOUR = 20       # deprecated
+POLL_AFTERHOURS_MINUTE = 0      # deprecated
 
 
 class RESTPollScheduler:
@@ -94,23 +99,22 @@ class RESTPollScheduler:
         logger.info("[AUTO_POLLING] 自动轮询已恢复")
 
     async def start(self) -> None:
-        """启动所有轮询任务"""
+        """启动每日定时批量采集任务
+
+        每天美东 20:00 执行一次全量数据采集 (6 数据源)。
+        数据通过 EventBus 发布后，由 SignalPipeline 消费并触发共振评分。
+        """
         if self._running:
             return
 
         self._running = True
 
-        # 延迟加载数据获取器
-        self._load_fetchers()
-
-        # 启动各数据源轮询任务
-        self._tasks.append(asyncio.create_task(self._poll_gex_dix()))
-        self._tasks.append(asyncio.create_task(self._poll_vix()))
-        self._tasks.append(asyncio.create_task(self._poll_axlfi()))
-        self._tasks.append(asyncio.create_task(self._poll_dbmf()))
+        # 启动每日批量采集循环
+        self._tasks.append(asyncio.create_task(self._run_daily_batch_loop()))
 
         logger.info(
-            f"RESTPollScheduler 已启动, {len(self._tasks)} 个轮询任务运行中"
+            "RESTPollScheduler 已启动 — 每日美东 %02d:%02d 执行全量数据采集",
+            DAILY_BATCH_HOUR, DAILY_BATCH_MINUTE,
         )
 
     async def shutdown(self) -> None:
@@ -171,321 +175,121 @@ class RESTPollScheduler:
             return datetime.now().weekday() < 5
 
     # ================================================================
-    # Poll Tasks: GEX/DIX (SqueezeMetrics)
+    # 每日定时批量采集 (ET 20:00)
     # ================================================================
 
-    async def _poll_gex_dix(self) -> None:
-        """轮询 SqueezeMetrics GEX+DIX 数据
+    async def _run_daily_batch_loop(self) -> None:
+        """每日批量采集主循环
 
-        盘中每15分钟获取一次, 发布到 EventBus Topics.GEX_UPDATE
+        每天美东 20:00 执行一次 run_once_manual_collect()，
+        将全部 6 数据源 (GEX/DIX, VIX, AXLFI暗盘, DBMF, 加密衍生品, 做空)
+        的最新数据通过 EventBus 发布，由 SignalPipeline 消费。
         """
-        logger.info("GEX/DIX 轮询任务已启动")
-        interval = POLL_INTERVAL_INTRADAY
+        import time as _time
+
+        logger.info(
+            "每日批量采集循环已启动 — 目标时间: 美东 %02d:%02d",
+            DAILY_BATCH_HOUR, DAILY_BATCH_MINUTE,
+        )
 
         while self._running:
             try:
-                # 暂停检查: 自动轮询关闭时休眠等待
+                # 暂停检查
                 if self._paused:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(5)
                     continue
 
-                if not self._is_market_hours() or not self._is_weekday():
-                    await asyncio.sleep(60)
-                    interval = POLL_INTERVAL_INTRADAY
-                    continue
+                # 计算到下一个美东 20:00 的等待秒数
+                wait_seconds = self._seconds_until_next_batch()
 
-                loop = asyncio.get_event_loop()
-                metrics = await loop.run_in_executor(
-                    self._executor,
-                    self._squeezemetrics.get_full_metrics,
+                if wait_seconds > 0:
+                    now_est = datetime.now(pytz.timezone('US/Eastern'))
+                    next_run = now_est.replace(
+                        hour=DAILY_BATCH_HOUR,
+                        minute=DAILY_BATCH_MINUTE,
+                        second=0,
+                        microsecond=0,
+                    )
+                    if next_run <= now_est:
+                        next_run = next_run.replace(day=next_run.day + 1)  # fallback
+
+                    logger.info(
+                        "距离下次批量采集: %.1f 小时 (目标: %s ET)",
+                        wait_seconds / 3600,
+                        next_run.strftime('%Y-%m-%d %H:%M'),
+                    )
+
+                    # 分段 sleep，每 60 秒检查一次 _running / _paused 状态
+                    while wait_seconds > 0 and self._running and not self._paused:
+                        chunk = min(wait_seconds, 60)
+                        await asyncio.sleep(chunk)
+                        wait_seconds -= chunk
+
+                    if not self._running:
+                        break
+                    if self._paused:
+                        continue
+
+                # ── 执行每日批量采集 ──
+                logger.info("=" * 54)
+                logger.info("  DAILY BATCH COLLECT STARTED  %s",
+                            datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                logger.info("=" * 54)
+
+                result = await self.run_once_manual_collect()
+
+                logger.info(
+                    "每日批量采集完成: %d/%d 成功, 耗时 %.1fs",
+                    result.get('success_count', 0),
+                    result.get('total_sources', 0),
+                    result.get('total_elapsed_sec', 0),
                 )
 
-                if metrics:
-                    await self._bus.publish(Topics.GEX_UPDATE, {
-                        'gex': metrics.get('gex', 0.0),
-                        'dix': metrics.get('dix', 0.0),
-                        'price': metrics.get('price', 0.0),
-                        'timestamp': datetime.now(),
-                    })
-                    logger.debug(
-                        f"GEX/DIX 已发布: GEX={metrics['gex']/1e9:.2f}B, "
-                        f"DIX={metrics['dix']:.1f}%"
-                    )
-                else:
-                    logger.debug("GEX/DIX 获取为空, 跳过")
-
-                interval = POLL_INTERVAL_INTRADAY
-                await asyncio.sleep(interval)
+                # 等待下一轮 (24小时后)
+                await asyncio.sleep(DAILY_BATCH_INTERVAL_SECONDS)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"GEX/DIX 轮询异常: {e}", exc_info=True)
-                await self._bus.publish(Topics.DATA_SOURCE_ERROR, {
-                    'source': 'squeezemetrics',
-                    'error': str(e),
-                })
-                await asyncio.sleep(60)
+                logger.error(f"每日批量采集异常: {e}", exc_info=True)
+                await asyncio.sleep(300)  # 出错等5分钟后重试
 
-    # ================================================================
-    # Poll Tasks: VIX (Yahoo Finance)
-    # ================================================================
+    def _seconds_until_next_batch(self) -> float:
+        """计算距离下一个美东 20:00 的秒数
 
-    async def _poll_vix(self) -> None:
-        """轮询 Yahoo Finance VIX 期限结构数据
-
-        盘中每15分钟获取一次, 发布到 EventBus Topics.VIX_TERM_STRUCTURE
+        Returns:
+            float: 等待秒数 (0 表示应立即执行)
         """
-        logger.info("VIX 轮询任务已启动")
-        interval = POLL_INTERVAL_INTRADAY
+        from datetime import timezone, timedelta
 
-        while self._running:
-            try:
-                # 暂停检查: 自动轮询关闭时休眠等待
-                if self._paused:
-                    await asyncio.sleep(1)
-                    continue
+        now_utc = datetime.now(timezone.utc)
+        eastern = pytz.timezone('US/Eastern')
+        now_est = now_utc.astimezone(eastern)
 
-                if not self._is_market_hours() or not self._is_weekday():
-                    await asyncio.sleep(60)
-                    interval = POLL_INTERVAL_INTRADAY
-                    continue
+        # 构造今天的 20:00 ET
+        target = now_est.replace(
+            hour=DAILY_BATCH_HOUR,
+            minute=DAILY_BATCH_MINUTE,
+            second=0,
+            microsecond=0,
+        )
 
-                loop = asyncio.get_event_loop()
+        if target <= now_est:
+            # 今天 20:00 已过，取明天 20:00
+            target = target.replace(day=target.day + 1)
 
-                vx1 = await loop.run_in_executor(
-                    self._executor,
-                    self._yahoo.get_vix_futures,
-                    'VX1',
-                )
-                vx2 = await loop.run_in_executor(
-                    self._executor,
-                    self._yahoo.get_vix_futures,
-                    'VX2',
-                )
-                vix_spot = await loop.run_in_executor(
-                    self._executor,
-                    self._yahoo.get_vix_spot,
-                )
-
-                if all([vx1, vx2, vix_spot]):
-                    await self._bus.publish(Topics.VIX_TERM_STRUCTURE, {
-                        'spot': vix_spot,
-                        'vx1': vx1,
-                        'vx2': vx2,
-                        'timestamp': datetime.now(),
-                    })
-                    logger.debug(
-                        f"VIX 已发布: spot={vix_spot:.2f}, "
-                        f"VX1={vx1:.2f}, VX2={vx2:.2f}"
-                    )
-                else:
-                    logger.debug("VIX 数据不完整, 跳过")
-
-                interval = POLL_INTERVAL_INTRADAY
-                await asyncio.sleep(interval)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"VIX 轮询异常: {e}", exc_info=True)
-                await self._bus.publish(Topics.DATA_SOURCE_ERROR, {
-                    'source': 'yahoo_vix',
-                    'error': str(e),
-                })
-                await asyncio.sleep(60)
+        delta = target - now_est
+        return max(0.0, delta.total_seconds())
 
     # ================================================================
-    # Poll Tasks: AXLFI Darkpool
-    # ================================================================
-
-    async def _poll_axlfi(self) -> None:
-        """轮询 AXLFI 暗盘净头寸数据
-
-        盘中每15分钟获取一次, 发布到 EventBus Topics.DARKPOOL_AXLFI
-        同时运行暗盘预处理器 (EMA快慢线/零轴穿越/动量反转)
-        """
-        logger.info("AXLFI 暗盘轮询任务已启动")
-        interval = POLL_INTERVAL_INTRADAY
-
-        # 延迟导入预处理器
-        from quant_logic.darkpool_preprocessor import DarkPoolPreprocessor
-        preprocessor = DarkPoolPreprocessor()
-
-        while self._running:
-            try:
-                # 暂停检查: 自动轮询关闭时休眠等待
-                if self._paused:
-                    await asyncio.sleep(1)
-                    continue
-
-                if not self._is_market_hours() or not self._is_weekday():
-                    await asyncio.sleep(60)
-                    interval = POLL_INTERVAL_INTRADAY
-                    continue
-
-                loop = asyncio.get_event_loop()
-                symbol_data = await loop.run_in_executor(
-                    self._executor,
-                    lambda: self._axlfi.fetch_symbol_data('SPY', 120),
-                )
-
-                if symbol_data:
-                    dp_position = symbol_data.get('dollar_dp_position', [])
-                    close_prices = symbol_data.get('close', [])
-
-                    if len(dp_position) >= 60:
-                        # 检测底背离
-                        divergence_result = await loop.run_in_executor(
-                            self._executor,
-                            lambda: self._axlfi.detect_bottom_divergence(
-                                (dp_position[-120:]
-                                 if len(dp_position) >= 120
-                                 else dp_position),
-                                (close_prices[-120:]
-                                 if close_prices and len(close_prices) >= 120
-                                 else dp_position[-120:]),
-                            ),
-                        )
-
-                        latest_dp = dp_position[-1]
-                        short_pct_list = symbol_data.get('short_volume_pct', [])
-                        latest_short_pct = (
-                            short_pct_list[-1] if short_pct_list else 0
-                        )
-
-                        # === 暗盘预处理: EMA快慢线/零轴穿越/动量反转 ===
-                        short_vol_series = symbol_data.get('short_volume', [])
-                        net_vol_series = symbol_data.get('net_volume', [])
-                        preprocess_result = None
-                        if short_vol_series and net_vol_series and len(short_vol_series) >= 20:
-                            preprocess_result = await loop.run_in_executor(
-                                self._executor,
-                                lambda: preprocessor.full_process(
-                                    short_vol_series[-120:] if len(short_vol_series) >= 120 else short_vol_series,
-                                    net_vol_series[-120:] if len(net_vol_series) >= 120 else net_vol_series,
-                                ),
-                            )
-
-                        await self._bus.publish(Topics.DARKPOOL_AXLFI, {
-                            'dollar_dp_position': dp_position,
-                            'close': close_prices,
-                            'divergence': divergence_result.get('divergence', False),
-                            'slope_20d': divergence_result.get('slope_20d', 0.0),
-                            'slope_60d': divergence_result.get('slope_60d', 0.0),
-                            'golden_cross': divergence_result.get('golden_cross', False),
-                            'short_volume_pct': short_pct_list,
-                            'timestamp': datetime.now(),
-                        })
-
-                        # 同时发布短卖比数据 (如果 yfinance 还未推送)
-                        # 注: yfinance 做空数据已在 run_afterhours_short_volume() 中获取
-                        if latest_short_pct > 0:
-                            await self._bus.publish(Topics.SHORT_VOLUME_SPY, {
-                                'ratio': latest_short_pct,
-                                'source': 'axlfi',
-                                'timestamp': datetime.now(),
-                            })
-
-                        # 发布暗盘预处理结果 (EMA快慢线/零轴穿越/动量反转)
-                        if preprocess_result:
-                            await self._bus.publish(Topics.DARKPOOL_PREPROCESSED, preprocess_result)
-
-                        logger.debug(
-                            f"AXLFI 已发布: DP=${latest_dp:,.0f}, "
-                            f"divergence={divergence_result.get('divergence')}"
-                        )
-                    else:
-                        logger.debug(f"AXLFI 数据点不足: {len(dp_position)}")
-                else:
-                    logger.debug("AXLFI 数据为空, 跳过")
-
-                interval = POLL_INTERVAL_INTRADAY
-                await asyncio.sleep(interval)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"AXLFI 轮询异常: {e}", exc_info=True)
-                await self._bus.publish(Topics.DATA_SOURCE_ERROR, {
-                    'source': 'axlfi',
-                    'error': str(e),
-                })
-                await asyncio.sleep(60)
-
-    # ================================================================
-    # Poll Tasks: DBMF
-    # ================================================================
-
-    async def _poll_dbmf(self) -> None:
-        """轮询 DBMF 均线收复信号
-
-        盘中每15分钟检测一次, 发布到 EventBus Topics.DBMF_RECOVERY
-        """
-        logger.info("DBMF 轮询任务已启动")
-        interval = POLL_INTERVAL_INTRADAY
-
-        while self._running:
-            try:
-                # 暂停检查: 自动轮询关闭时休眠等待
-                if self._paused:
-                    await asyncio.sleep(1)
-                    continue
-
-                if not self._is_market_hours() or not self._is_weekday():
-                    await asyncio.sleep(60)
-                    interval = POLL_INTERVAL_INTRADAY
-                    continue
-
-                loop = asyncio.get_event_loop()
-
-                current_price = await loop.run_in_executor(
-                    self._executor,
-                    self._dbmf.get_dbmf_intraday_price,
-                )
-                historical_prices = await loop.run_in_executor(
-                    self._executor,
-                    lambda: self._dbmf.get_dbmf_historical_prices(period="10d"),
-                )
-
-                if current_price and historical_prices:
-                    recovery = await loop.run_in_executor(
-                        self._executor,
-                        self._dbmf.check_ma5_recovery,
-                        current_price,
-                        historical_prices,
-                    )
-
-                    await self._bus.publish(
-                        Topics.DBMF_RECOVERY,
-                        {'recovery': recovery, 'price': current_price},
-                    )
-                    logger.debug(
-                        f"DBMF 已发布: price={current_price:.2f}, recovery={recovery}"
-                    )
-
-                interval = POLL_INTERVAL_INTRADAY
-                await asyncio.sleep(interval)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"DBMF 轮询异常: {e}", exc_info=True)
-                await self._bus.publish(Topics.DATA_SOURCE_ERROR, {
-                    'source': 'dbmf',
-                    'error': str(e),
-                })
-                await asyncio.sleep(60)
-
-    # ================================================================
-    # 盘后任务: 做空数据 (yfinance → FINRA)
+    # 盘后任务: 做空数据 (yfinance → FINRA) — 已并入每日批量采集
     # ================================================================
 
     async def run_afterhours_short_volume(self) -> None:
         """盘后获取做空数据 (yfinance → FINRA 降级链路)
 
-        一次性执行: yfinance short interest 优先, 失败则降级 FINRA 管道文件。
-        结果发布到 EventBus Topics.SHORT_VOLUME_SPY
+        已并入每日批量采集 (`run_once_manual_collect` 的 `_poll_short_once`)。
+        保留此方法用于独立调用和向后兼容。
         """
         logger.info("盘后做空数据任务启动 (yfinance → FINRA 降级)")
         try:
@@ -613,8 +417,6 @@ class RESTPollScheduler:
 
     async def _poll_gex_dix_once(self):
         """单次 GEX/DIX 采集 (忽略市场时间)"""
-        if self._squeezemetrics is None:
-            return
         loop = asyncio.get_event_loop()
         metrics = await loop.run_in_executor(
             self._executor, self._squeezemetrics.get_full_metrics
@@ -687,7 +489,7 @@ class RESTPollScheduler:
         loop = asyncio.get_event_loop()
         current_price = await loop.run_in_executor(self._executor, self._dbmf.get_dbmf_intraday_price)
         historical_prices = await loop.run_in_executor(
-            self._executor, lambda: self._dbmf.get_dbmf_historical_prices(period="10d")
+            self._executor, lambda: self._dbmf.get_dbmf_historical_prices(days=10)
         )
         if current_price and historical_prices:
             recovery = await loop.run_in_executor(
