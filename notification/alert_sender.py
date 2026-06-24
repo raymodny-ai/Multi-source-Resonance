@@ -395,6 +395,55 @@ class AlertSender:
         return message.strip()
 
 
+    def format_gex_delta_anomaly_alert(
+        self,
+        symbol: str,
+        delta_result: Dict[str, any],
+        current_time: datetime,
+        gexmetrix_score: Optional[Dict[str, any]] = None,
+    ) -> str:
+        """格式化 GEX Delta 异常告警消息 (Task 9)
+
+        当检测到 GEXMetrix 快照间 Net GEX 剧烈变化时，
+        生成标准化的异常告警消息。
+
+        Args:
+            symbol: 标的代码
+            delta_result: check_gex_delta_anomaly() 的返回结果
+            current_time: 触发时间 (美东)
+            gexmetrix_score: GEXMetrix 评分结果 (可选)
+
+        Returns:
+            str: 格式化的 Markdown 消息
+        """
+        level = delta_result.get('level', 'NORMAL')
+        delta_pct = delta_result.get('delta_pct')
+        details = delta_result.get('details', '')
+
+        level_emoji = '🔴' if level == 'CRITICAL' else ('🟡' if level == 'WARNING' else '🟢')
+
+        message = f"""
+{level_emoji} **[GEX DELTA 异常] 做市商Gamma持仓剧变**
+
+**标的**: {symbol}
+**触发时间**: {current_time.strftime('%Y-%m-%d %H:%M:%S')} EST
+**异常级别**: {level}
+**变化幅度**: {delta_pct if delta_pct else 'N/A'}{'%' if delta_pct else ''}
+
+**详情**: {details}
+"""
+        if gexmetrix_score:
+            message += f"""
+**GEXMetrix 评分**: {gexmetrix_score.get('score', 0):.2f} [{gexmetrix_score.get('state', 'N/A')}]
+**说明**: {gexmetrix_score.get('details', 'N/A')}
+"""
+        message += """
+---
+> ⚠️ 做市商对冲行为剧烈调整可能预示市场结构变化。请结合其他维度验证。
+"""
+        return message.strip()
+
+
 # 便捷函数
 def create_alert_sender() -> AlertSender:
     """

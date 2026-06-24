@@ -51,6 +51,9 @@ class Topics:
     # GEX / DIX 维度
     GEX_UPDATE = "gex.update"
 
+    # GEXMetrix Gamma Dashboard 维度
+    GEXMETRIX_SNAPSHOT = "gexmetrix.snapshot"
+
     # VIX 维度
     VIX_TERM_STRUCTURE = "vix.term_structure"
 

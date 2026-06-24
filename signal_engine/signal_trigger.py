@@ -418,3 +418,110 @@ def convert_to_est(dt: datetime) -> datetime:
         dt = pytz.UTC.localize(dt)
     
     return dt.astimezone(eastern)
+
+
+def check_gex_delta_anomaly(
+    current_snapshot: Dict[str, any],
+    previous_snapshot: Optional[Dict[str, any]],
+    threshold_pct: float = 30.0,
+) -> Dict[str, any]:
+    """检测 GEX Delta 异常变化 (Task 9)
+
+    比较前后两次 GEXMetrix 快照的 Net GEX 变化率。
+    当变化超过阈值时，说明做市商持仓发生剧烈调整，
+    可能预示市场结构变化。
+
+    Args:
+        current_snapshot: 当前 GEXMetrix 快照 (含 net_gex, zero_gamma_level 等)
+        previous_snapshot: 前一次快照 (可为 None)
+        threshold_pct: 变化率阈值 (%), 默认 30%
+
+    Returns:
+        dict: {
+            'anomaly': bool,
+            'delta_pct': float or None,
+            'delta_abs': float or None,
+            'details': str,
+            'level': 'CRITICAL' | 'WARNING' | 'NORMAL',
+        }
+    """
+    try:
+        cur_net = current_snapshot.get("net_gex")
+        cur_symbol = current_snapshot.get("symbol", "UNKNOWN")
+
+        if previous_snapshot is None:
+            return {
+                'anomaly': False,
+                'delta_pct': None,
+                'delta_abs': None,
+                'details': f'{cur_symbol}: 无历史快照，跳过Delta比较',
+                'level': 'NORMAL',
+            }
+
+        prev_net = previous_snapshot.get("net_gex")
+        if cur_net is None or prev_net is None:
+            return {
+                'anomaly': False,
+                'delta_pct': None,
+                'delta_abs': None,
+                'details': f'{cur_symbol}: Net GEX 数据缺失',
+                'level': 'NORMAL',
+            }
+
+        if prev_net == 0:
+            if cur_net != 0:
+                return {
+                    'anomaly': True,
+                    'delta_pct': 100.0,
+                    'delta_abs': abs(cur_net),
+                    'details': f'{cur_symbol}: GEX从0翻转为{cur_net/1e6:.1f}M (Gamma Flip)',
+                    'level': 'CRITICAL',
+                }
+            return {
+                'anomaly': False,
+                'delta_pct': 0.0,
+                'delta_abs': 0.0,
+                'details': f'{cur_symbol}: Net GEX 无变化',
+                'level': 'NORMAL',
+            }
+
+        delta_abs = cur_net - prev_net
+        delta_pct = (delta_abs / abs(prev_net)) * 100
+
+        # 判定异常级别
+        if abs(delta_pct) >= threshold_pct * 2:
+            level = 'CRITICAL'
+            anomaly = True
+        elif abs(delta_pct) >= threshold_pct:
+            level = 'WARNING'
+            anomaly = True
+        else:
+            level = 'NORMAL'
+            anomaly = False
+
+        direction = '增加' if delta_abs > 0 else '减少'
+        details = (
+            f'{cur_symbol}: Net GEX {direction} {abs(delta_pct):.1f}% '
+            f'({prev_net/1e6:.1f}M → {cur_net/1e6:.1f}M)'
+        )
+
+        if anomaly:
+            logger.warning(f"GEX Delta 异常: {details} [{level}]")
+
+        return {
+            'anomaly': anomaly,
+            'delta_pct': round(delta_pct, 2),
+            'delta_abs': round(delta_abs, 2),
+            'details': details,
+            'level': level,
+        }
+
+    except Exception as e:
+        logger.error(f"GEX Delta 异常检测失败: {e}", exc_info=True)
+        return {
+            'anomaly': False,
+            'delta_pct': None,
+            'delta_abs': None,
+            'details': f'检测异常: {str(e)}',
+            'level': 'ERROR',
+        }

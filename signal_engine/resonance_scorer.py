@@ -744,3 +744,126 @@ class ResonanceScorer:
                 'details': f'计算异常: {str(e)}',
                 'method': 'error',
             }
+
+    # ================================================================
+    # GEXMetrix 评分 (Task 9 - Gamma Dashboard 信号注入)
+    # ================================================================
+
+    def calculate_gexmetrix_score(
+        self,
+        spot_price: Optional[float],
+        zero_gamma_level: Optional[float],
+        call_wall: Optional[float],
+        put_wall: Optional[float],
+        net_gex: Optional[float],
+    ) -> Dict[str, any]:
+        """计算 GEXMetrix Gamma Dashboard 维度分值
+
+        基于 GEXMetrix 的 Gamma 市场结构数据，评估期权做市商对冲行为
+        对价格的支撑/压制效应。
+
+        Zero Gamma Level 偏离信号:
+        - 现货价格高于 Zero Gamma 线 → 正 Gamma 区 → 均值回归力 (+0.5)
+        - 现货价格低于 Zero Gamma 线 → 负 Gamma 区 → 趋势加速风险 (-0.5)
+
+        Call Wall / Put Wall 作为支撑/阻力信号:
+        - 现货接近 Put Wall (<2%) → 强支撑 (+0.25)
+        - 现货接近 Call Wall (<2%) → 强阻力 (-0.25)
+
+        Args:
+            spot_price: 现货价格
+            zero_gamma_level: Zero Gamma 价位 (做市商对冲方向分界线)
+            call_wall: Call Wall 行权价
+            put_wall: Put Wall 行权价
+            net_gex: 净 Gamma 敞口
+
+        Returns:
+            dict: score (float 0.0~1.0), state, details
+        """
+        try:
+            score = 0.0
+            signals = []
+
+            # ── Zero Gamma Level 偏离信号 ──
+            if spot_price is not None and zero_gamma_level is not None and zero_gamma_level > 0:
+                deviation_pct = (spot_price - zero_gamma_level) / zero_gamma_level
+
+                if deviation_pct > 0.01:  # 现货在 Zero Gamma 上方 >1%
+                    score += 0.5
+                    signals.append(
+                        f"现货({spot_price:.0f})高于Zero Gamma({zero_gamma_level:.0f}), "
+                        f"正Gamma区,均值回归力+0.5"
+                    )
+                elif deviation_pct < -0.01:  # 现货在 Zero Gamma 下方 >1%
+                    score -= 0.5
+                    signals.append(
+                        f"现货({spot_price:.0f})低于Zero Gamma({zero_gamma_level:.0f}), "
+                        f"负Gamma区,趋势加速风险-0.5"
+                    )
+                else:
+                    signals.append(
+                        f"现货接近Zero Gamma线({zero_gamma_level:.0f}),偏离{deviation_pct*100:.1f}%"
+                    )
+
+            # ── Call Wall / Put Wall 价位信号 ──
+            if spot_price is not None:
+                if put_wall is not None and put_wall > 0:
+                    dist_to_put = (spot_price - put_wall) / put_wall
+                    if 0 <= dist_to_put < 0.02:  # 现货在 Put Wall 上方 <2%
+                        score += 0.25
+                        signals.append(
+                            f"现货({spot_price:.0f})接近Put Wall({put_wall:.0f}), "
+                            f"强支撑 +0.25"
+                        )
+                    elif dist_to_put < 0:  # 跌破 Put Wall
+                        score -= 0.25
+                        signals.append(
+                            f"现货({spot_price:.0f})跌破Put Wall({put_wall:.0f}), "
+                            f"支撑失守 -0.25"
+                        )
+
+                if call_wall is not None and call_wall > 0:
+                    dist_to_call = (call_wall - spot_price) / call_wall
+                    if 0 <= dist_to_call < 0.02:  # 现货在 Call Wall 下方 <2%
+                        score += 0.25
+                        signals.append(
+                            f"现货({spot_price:.0f})接近Call Wall({call_wall:.0f}), "
+                            f"突破阻力在即 +0.25"
+                        )
+
+            # ── Net GEX 方向信号 ──
+            if net_gex is not None:
+                if net_gex > 0:
+                    signals.append(f"Net GEX为正({net_gex/1e6:.1f}M),做市商多头对冲")
+                else:
+                    signals.append(f"Net GEX为负({net_gex/1e6:.1f}M),做市商空头对冲")
+
+            # ── 状态判定 ──
+            score = max(-0.5, min(1.0, score))
+            if score >= 0.5:
+                state = 'POSITIVE_GAMMA'
+            elif score > 0:
+                state = 'SLIGHTLY_POSITIVE'
+            elif score == 0:
+                state = 'NEUTRAL'
+            elif score > -0.3:
+                state = 'SLIGHTLY_NEGATIVE'
+            else:
+                state = 'NEGATIVE_GAMMA'
+
+            details = '; '.join(signals) if signals else 'GEXMetrix数据不足'
+            logger.info(f"GEXMetrix评分: {score:.2f}分 [{state}] - {details}")
+
+            return {
+                'score': round(score, 2),
+                'state': state,
+                'details': details,
+            }
+
+        except Exception as e:
+            logger.error(f"GEXMetrix评分计算异常: {e}", exc_info=True)
+            return {
+                'score': 0.0,
+                'state': 'ERROR',
+                'details': f'计算异常: {str(e)}',
+            }

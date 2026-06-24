@@ -2,7 +2,7 @@
 多源共振监控系统 - REST 轮询调度器 (轻量级, 替代 APScheduler)
 
 处理不支持 WebSocket 的数据源 (SqueezeMetrics GEX, Yahoo VIX,
-AXLFI 暗盘, DBMF, FINRA 短卖比)。
+AXLFI 暗盘, DBMF, FINRA 短卖比, GEXMetrix Gamma Dashboard)。
 
 与旧 Pull 架构的对比:
     旧: APScheduler cron jobs → 固定时刻执行
@@ -73,6 +73,7 @@ class RESTPollScheduler:
         self._finra = None
         self._hyperliquid = None  # 加密衍生品 REST
         self._ccdata = None       # 加密衍生品降级
+        self._gexmetrix = None    # GEXMetrix 期权市场结构
 
         logger.info("RESTPollScheduler 初始化完成")
 
@@ -99,9 +100,10 @@ class RESTPollScheduler:
         logger.info("[AUTO_POLLING] 自动轮询已恢复")
 
     async def start(self) -> None:
-        """启动每日定时批量采集任务
+        """启动每日定时批量采集任务 + GEXMetrix 盘中轮询
 
-        每天美东 20:00 执行一次全量数据采集 (6 数据源)。
+        每天美东 20:00 执行一次全量数据采集 (7 数据源)。
+        GEXMetrix 独立盘中轮询 (盘中5min/盘后30min/盘前1h)。
         数据通过 EventBus 发布后，由 SignalPipeline 消费并触发共振评分。
         """
         if self._running:
@@ -112,8 +114,11 @@ class RESTPollScheduler:
         # 启动每日批量采集循环
         self._tasks.append(asyncio.create_task(self._run_daily_batch_loop()))
 
+        # 启动 GEXMetrix 盘中轮询循环
+        self._tasks.append(asyncio.create_task(self._run_gexmetrix_intraday_loop()))
+
         logger.info(
-            "RESTPollScheduler 已启动 — 每日美东 %02d:%02d 执行全量数据采集",
+            "RESTPollScheduler 已启动 — 每日美东 %02d:%02d 执行全量数据采集 + GEXMetrix 盘中轮询",
             DAILY_BATCH_HOUR, DAILY_BATCH_MINUTE,
         )
 
@@ -141,6 +146,7 @@ class RESTPollScheduler:
             from data_fetchers import FINRAFetcher, DBMFFetcher
             from data_fetchers import HyperliquidFetcher, CCDataFetcher
             from data_fetchers.axlfi_fetcher import AxlfiFetcher
+            from data_fetchers.gexmetrix_fetcher import GEXMetrixFetcher
 
             self._yahoo = YahooFinanceFetcher()  # VIX + 做空数据 (yfinance)
             self._axlfi = AxlfiFetcher()
@@ -148,7 +154,8 @@ class RESTPollScheduler:
             self._finra = FINRAFetcher()
             self._hyperliquid = HyperliquidFetcher()  # 加密衍生品 (REST 降级)
             self._ccdata = CCDataFetcher()            # 加密衍生品 (二级降级)
-            logger.debug("数据获取器延迟加载完成 (6 数据源)")
+            self._gexmetrix = GEXMetrixFetcher()      # GEXMetrix 期权市场结构
+            logger.debug("数据获取器延迟加载完成 (7 数据源)")
         except Exception as e:
             logger.error(f"数据获取器加载失败: {e}", exc_info=True)
 
@@ -182,7 +189,7 @@ class RESTPollScheduler:
         """每日批量采集主循环
 
         每天美东 20:00 执行一次 run_once_manual_collect()，
-        将全部 6 数据源 (GEX/DIX, VIX, AXLFI暗盘, DBMF, 加密衍生品, 做空)
+        将全部 7 数据源 (GEX/DIX, VIX, AXLFI暗盘, DBMF, 加密衍生品, 做空, GEXMetrix)
         的最新数据通过 EventBus 发布，由 SignalPipeline 消费。
         """
         import time as _time
@@ -341,7 +348,7 @@ class RESTPollScheduler:
     # ================================================================
 
     async def run_once_manual_collect(self) -> Dict[str, Any]:
-        """手动触发一次完整的 6 数据源采集循环
+        """手动触发一次完整的 7 数据源采集循环
 
         忽略自动轮询暂停状态和市场时间限制，
         并发执行所有数据源采集，并通过 EventBus 发布。
@@ -357,7 +364,7 @@ class RESTPollScheduler:
         logger.info("=" * 54)
         logger.info("  MANUAL COLLECT STARTED  %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         logger.info("=" * 54)
-        logger.info("── 开始手动采集 (6 数据源) ──")
+        logger.info("── 开始手动采集 (7 数据源) ──")
 
         self._load_fetchers()
 
@@ -381,14 +388,15 @@ class RESTPollScheduler:
                 logger.error("[%-8s] ✗ 采集失败  耗时 %.2fs  (%s)", source_tag, elapsed, str(e)[:80])
                 return {"name": name, "source_tag": source_tag, "status": "error", "elapsed_sec": elapsed, "error": str(e)}
 
-        # 并发执行全部 6 个采集任务
+        # 并发执行全部 7 个采集任务
         tasks = [
-            _collect_one("GEX/DIX",       "GEX/DIX", self._poll_gex_dix_once()),
-            _collect_one("VIX期限结构",    "VIX",     self._poll_vix_once()),
-            _collect_one("AXLFI暗盘",      "AXLFI",   self._poll_axlfi_once()),
-            _collect_one("DBMF均线",       "DBMF",    self._poll_dbmf_once()),
-            _collect_one("加密衍生品",     "CRYPTO",  self._poll_crypto_once()),
-            _collect_one("做空数据",       "SHORT",   self._poll_short_once()),
+            _collect_one("GEX/DIX",       "GEX/DIX",  self._poll_gex_dix_once()),
+            _collect_one("VIX期限结构",    "VIX",      self._poll_vix_once()),
+            _collect_one("AXLFI暗盘",      "AXLFI",    self._poll_axlfi_once()),
+            _collect_one("DBMF均线",       "DBMF",     self._poll_dbmf_once()),
+            _collect_one("加密衍生品",     "CRYPTO",   self._poll_crypto_once()),
+            _collect_one("做空数据",       "SHORT",    self._poll_short_once()),
+            _collect_one("GEXMetrix",      "GEXMETRIX", self._poll_gexmetrix_once()),
         ]
         results = list(await asyncio.gather(*tasks))
 
@@ -599,3 +607,305 @@ class RESTPollScheduler:
             })
         else:
             raise RuntimeError("yfinance 和 FINRA 均获取做空数据失败")
+
+    # ================================================================
+    # GEXMetrix 采集 (期权市场结构 Gamma Dashboard)
+    # ================================================================
+
+    async def _poll_gexmetrix_once(self):
+        """单次 GEXMetrix 采集 (核心标的 → 解析关键指标 → EventBus)
+
+        拉取核心标的 (SPX/SPY/QQQ/VIX/IWM/NDX) 的 GEXMetrix 快照，
+        解析 Net GEX / Call GEX / Put GEX / Zero Gamma Level / Call Wall / Put Wall
+        等关键指标，并通过 EventBus 发布供信号引擎消费。
+        """
+        loop = asyncio.get_event_loop()
+
+        try:
+            # 拉取核心标的快照
+            results = await loop.run_in_executor(
+                self._executor, self._gexmetrix.fetch_core
+            )
+
+            if not results:
+                raise RuntimeError("GEXMetrix 核心标的拉取无数据返回")
+
+            # 解析每个标的的关键指标并写入数据库
+            snapshots = []
+            for r in results:
+                symbol = r.get("symbol", "")
+                filename = r.get("filename", "")
+                timestamp_str = r.get("timestamp", "")
+                file_size = r.get("file_size", 0)
+
+                # 读取快照原始数据并解析
+                raw = None
+                try:
+                    raw = await loop.run_in_executor(
+                        self._executor,
+                        lambda s=symbol: self._gexmetrix.read_snapshot(s),
+                    )
+                except Exception:
+                    pass
+
+                metrics = self._gexmetrix.parse_snapshot_key_metrics(raw) if raw else {}
+
+                try:
+                    ts = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S") if timestamp_str else datetime.now()
+                except ValueError:
+                    ts = datetime.now()
+
+                snapshot = {
+                    "symbol": symbol,
+                    "timestamp": ts.isoformat(),
+                    "filename": filename,
+                    "net_gex": metrics.get("net_gex"),
+                    "call_gex": metrics.get("call_gex"),
+                    "put_gex": metrics.get("put_gex"),
+                    "zero_gamma_level": metrics.get("zero_gamma_level"),
+                    "call_wall": metrics.get("call_wall"),
+                    "put_wall": metrics.get("put_wall"),
+                    "spot_price": metrics.get("spot_price"),
+                    "total_gamma": metrics.get("total_gamma"),
+                    "file_size": file_size,
+                }
+                snapshots.append(snapshot)
+
+                # 写入数据库
+                try:
+                    await loop.run_in_executor(
+                        self._executor,
+                        lambda s=snapshot: db_insert_gex(s),
+                    )
+                except Exception:
+                    pass
+
+            # 发布到 EventBus
+            await self._bus.publish(Topics.GEXMETRIX_SNAPSHOT, {
+                "snapshots": snapshots,
+                "count": len(snapshots),
+                "timestamp": datetime.now().isoformat(),
+            })
+
+            logger.info(
+                "GEXMetrix 采集完成: %d 标的",
+                len(snapshots),
+            )
+
+        except Exception as e:
+            logger.error(f"GEXMetrix 采集失败: {e}", exc_info=True)
+            raise
+
+    # ================================================================
+    # GEXMetrix 盘中轮询循环
+    # ================================================================
+
+    def _get_gexmetrix_session(self) -> str:
+        """判断当前 GEXMetrix 采集时段
+
+        Returns:
+            str: 'market_hours' | 'after_hours' | 'pre_market' | 'closed'
+        """
+        try:
+            eastern = pytz.timezone('US/Eastern')
+            now = datetime.now(eastern)
+            minutes = now.hour * 60 + now.minute
+            weekday = now.weekday()  # 0=Mon, 6=Sun
+
+            if weekday >= 5:  # 周末
+                return 'closed'
+
+            pre_open = 4 * 60       # 04:00
+            market_open = 9 * 60 + 30  # 09:30
+            market_close = 16 * 60   # 16:00
+            after_close = 20 * 60    # 20:00
+
+            if market_open <= minutes < market_close:
+                return 'market_hours'
+            elif market_close <= minutes < after_close:
+                return 'after_hours'
+            elif pre_open <= minutes < market_open:
+                return 'pre_market'
+            else:
+                return 'closed'
+        except Exception:
+            return 'closed'
+
+    async def _run_gexmetrix_intraday_loop(self) -> None:
+        """GEXMetrix 盘中轮询主循环
+
+        根据交易时段自动切换采集频率和标的范围：
+        - 盘中 (9:30-16:00 ET): 每 5 分钟拉取核心标的
+        - 盘后 (16:00-20:00 ET): 每 30 分钟全量拉取
+        - 盘前 (4:00-9:30 ET): 每 60 分钟拉取指数标的
+        - 非交易时段: 停止轮询，每 5 分钟检查一次状态
+        """
+        import time as _time
+
+        logger.info("GEXMetrix 盘中轮询循环已启动 (盘中5min / 盘后30min / 盘前1h)")
+
+        while self._running:
+            try:
+                if self._paused:
+                    await asyncio.sleep(30)
+                    continue
+
+                session = self._get_gexmetrix_session()
+
+                if session == 'market_hours':
+                    interval = 300  # 5 分钟
+                    logger.debug("GEXMetrix 盘中模式: 核心标的 每%d秒", interval)
+                    loop = asyncio.get_event_loop()
+                    try:
+                        results = await loop.run_in_executor(
+                            self._executor, self._gexmetrix.fetch_core
+                        )
+                        if results:
+                            snapshots = []
+                            for r in results:
+                                raw = None
+                                try:
+                                    raw = await loop.run_in_executor(
+                                        self._executor,
+                                        lambda s=r["symbol"]: self._gexmetrix.read_snapshot(s),
+                                    )
+                                except Exception:
+                                    pass
+                                metrics = self._gexmetrix.parse_snapshot_key_metrics(raw) if raw else {}
+                                snapshots.append({
+                                    "symbol": r["symbol"],
+                                    "timestamp": r.get("timestamp", ""),
+                                    "net_gex": metrics.get("net_gex"),
+                                    "call_gex": metrics.get("call_gex"),
+                                    "put_gex": metrics.get("put_gex"),
+                                    "zero_gamma_level": metrics.get("zero_gamma_level"),
+                                    "call_wall": metrics.get("call_wall"),
+                                    "put_wall": metrics.get("put_wall"),
+                                    "spot_price": metrics.get("spot_price"),
+                                    "total_gamma": metrics.get("total_gamma"),
+                                })
+                            await self._bus.publish(Topics.GEXMETRIX_SNAPSHOT, {
+                                "snapshots": snapshots,
+                                "count": len(snapshots),
+                                "session": "market_hours",
+                                "timestamp": datetime.now().isoformat(),
+                            })
+                            logger.info("GEXMetrix 盘中: %d 标的已更新", len(snapshots))
+                    except Exception as e:
+                        logger.warning(f"GEXMetrix 盘中小幅采集失败: {e}")
+
+                elif session == 'after_hours':
+                    interval = 1800  # 30 分钟
+                    logger.debug("GEXMetrix 盘后模式: 全量标的 每%d秒", interval)
+                    loop = asyncio.get_event_loop()
+                    try:
+                        results = await loop.run_in_executor(
+                            self._executor, self._gexmetrix.fetch_all
+                        )
+                        if results:
+                            snapshots = []
+                            for r in results:
+                                raw = None
+                                try:
+                                    raw = await loop.run_in_executor(
+                                        self._executor,
+                                        lambda s=r["symbol"]: self._gexmetrix.read_snapshot(s),
+                                    )
+                                except Exception:
+                                    pass
+                                metrics = self._gexmetrix.parse_snapshot_key_metrics(raw) if raw else {}
+                                snapshots.append({
+                                    "symbol": r["symbol"],
+                                    "timestamp": r.get("timestamp", ""),
+                                    "net_gex": metrics.get("net_gex"),
+                                    "zero_gamma_level": metrics.get("zero_gamma_level"),
+                                    "spot_price": metrics.get("spot_price"),
+                                })
+                            await self._bus.publish(Topics.GEXMETRIX_SNAPSHOT, {
+                                "snapshots": snapshots,
+                                "count": len(snapshots),
+                                "session": "after_hours",
+                                "timestamp": datetime.now().isoformat(),
+                            })
+                            logger.info("GEXMetrix 盘后: %d 标的已更新", len(snapshots))
+                    except Exception as e:
+                        logger.warning(f"GEXMetrix 盘后全量采集失败: {e}")
+
+                elif session == 'pre_market':
+                    interval = 3600  # 60 分钟
+                    logger.debug("GEXMetrix 盘前模式: 指数标的 每%d秒", interval)
+                    loop = asyncio.get_event_loop()
+                    try:
+                        results = await loop.run_in_executor(
+                            self._executor, self._gexmetrix.fetch_indices
+                        )
+                        if results:
+                            snapshots = []
+                            for r in results:
+                                raw = None
+                                try:
+                                    raw = await loop.run_in_executor(
+                                        self._executor,
+                                        lambda s=r["symbol"]: self._gexmetrix.read_snapshot(s),
+                                    )
+                                except Exception:
+                                    pass
+                                metrics = self._gexmetrix.parse_snapshot_key_metrics(raw) if raw else {}
+                                snapshots.append({
+                                    "symbol": r["symbol"],
+                                    "timestamp": r.get("timestamp", ""),
+                                    "net_gex": metrics.get("net_gex"),
+                                    "zero_gamma_level": metrics.get("zero_gamma_level"),
+                                    "spot_price": metrics.get("spot_price"),
+                                })
+                            await self._bus.publish(Topics.GEXMETRIX_SNAPSHOT, {
+                                "snapshots": snapshots,
+                                "count": len(snapshots),
+                                "session": "pre_market",
+                                "timestamp": datetime.now().isoformat(),
+                            })
+                            logger.info("GEXMetrix 盘前: %d 指数标的已更新", len(snapshots))
+                    except Exception as e:
+                        logger.warning(f"GEXMetrix 盘前指数采集失败: {e}")
+
+                else:  # closed / 周末
+                    interval = 300  # 5 分钟后重新检查
+                    logger.debug("GEXMetrix 非交易时段 — 暂停轮询")
+
+                # 分段 sleep，定期检查 _running / _paused 状态
+                waited = 0
+                while waited < interval and self._running and not self._paused:
+                    chunk = min(interval - waited, 30)
+                    await asyncio.sleep(chunk)
+                    waited += chunk
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"GEXMetrix 盘中轮询异常: {e}", exc_info=True)
+                await asyncio.sleep(60)
+
+        logger.info("GEXMetrix 盘中轮询循环已退出")
+
+
+def db_insert_gex(snapshot: dict) -> None:
+    """独立函数用于线程池中写入 GEX 快照到数据库"""
+    try:
+        from database.db_manager import DatabaseManager
+        db = DatabaseManager()
+        db.insert_gex_snapshot(
+            symbol=snapshot.get("symbol", ""),
+            timestamp=snapshot.get("timestamp", datetime.now().isoformat()),
+            filename=snapshot.get("filename", ""),
+            net_gex=snapshot.get("net_gex"),
+            call_gex=snapshot.get("call_gex"),
+            put_gex=snapshot.get("put_gex"),
+            zero_gamma_level=snapshot.get("zero_gamma_level"),
+            call_wall=snapshot.get("call_wall"),
+            put_wall=snapshot.get("put_wall"),
+            spot_price=snapshot.get("spot_price"),
+            total_gamma=snapshot.get("total_gamma"),
+            file_size=snapshot.get("file_size", 0),
+        )
+    except Exception as e:
+        logger.error(f"数据库写入 GEX 快照失败: {e}")

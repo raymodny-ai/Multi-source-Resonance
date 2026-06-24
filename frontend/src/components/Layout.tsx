@@ -15,11 +15,13 @@ import {
   Menu,
   X,
   Clock,
+  BarChart3,
 } from 'lucide-react'
 
 const NAV_ITEMS = [
   { path: '/', label: '仪表盘', icon: LayoutDashboard },
   { path: '/darkpool', label: '暗盘详情', icon: ChartArea },
+  { path: '/gex', label: 'Gamma 仪表盘', icon: BarChart3 },
   { path: '/signals', label: '共振信号', icon: Activity },
   { path: '/alerts', label: '告警中心', icon: Bell },
   { path: '/llm', label: 'LLM 分析', icon: Brain },

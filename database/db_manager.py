@@ -1159,6 +1159,178 @@ class DatabaseManager:
             return []
 
     # ============================================================
+    # I. GEXMetrix 快照操作 (Phase 8)
+    # ============================================================
+
+    def insert_gex_snapshot(
+        self,
+        symbol: str,
+        timestamp: datetime,
+        filename: str,
+        net_gex: Optional[float] = None,
+        call_gex: Optional[float] = None,
+        put_gex: Optional[float] = None,
+        zero_gamma_level: Optional[float] = None,
+        call_wall: Optional[float] = None,
+        put_wall: Optional[float] = None,
+        spot_price: Optional[float] = None,
+        total_gamma: Optional[float] = None,
+        file_size: Optional[int] = None,
+    ) -> bool:
+        """插入 GEXMetrix 快照摘要"""
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO gex_snapshots
+                    (symbol, timestamp, filename, net_gex, call_gex, put_gex,
+                     zero_gamma_level, call_wall, put_wall, spot_price,
+                     total_gamma, file_size)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    symbol.upper(),
+                    timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
+                    filename,
+                    net_gex,
+                    call_gex,
+                    put_gex,
+                    zero_gamma_level,
+                    call_wall,
+                    put_wall,
+                    spot_price,
+                    total_gamma,
+                    file_size,
+                ))
+            logger.debug(f"GEX快照插入成功: {symbol} @ {timestamp}")
+            return True
+        except Exception as e:
+            logger.error(f"插入GEX快照失败 ({symbol}): {e}")
+            return False
+
+    def get_gex_snapshot_latest(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """获取某标的最新 GEX 快照"""
+        try:
+            cursor = self.connection.execute("""
+                SELECT * FROM gex_snapshots
+                WHERE symbol = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (symbol.upper(),))
+            row = cursor.fetchone()
+            return self._row_to_dict(row)
+        except Exception as e:
+            logger.error(f"查询GEX快照失败 ({symbol}): {e}")
+            return None
+
+    def get_gex_snapshot_history(
+        self, symbol: str, days: int = 7
+    ) -> List[Dict[str, Any]]:
+        """获取某标的历史 Net GEX 时间序列"""
+        try:
+            cursor = self.connection.execute("""
+                SELECT symbol, timestamp, net_gex, spot_price
+                FROM gex_snapshots
+                WHERE symbol = ?
+                  AND timestamp >= datetime('now', '-' || ? || ' days')
+                ORDER BY timestamp ASC
+            """, (symbol.upper(), days))
+            rows = cursor.fetchall()
+            return [self._row_to_dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"查询GEX历史失败 ({symbol}, {days}d): {e}")
+            return []
+
+    def get_gex_snapshot_symbols(self) -> List[Dict[str, Any]]:
+        """获取所有可用标的及数据新鲜度"""
+        try:
+            cursor = self.connection.execute("""
+                SELECT symbol,
+                       MAX(timestamp) as latest_timestamp,
+                       COUNT(*) as snapshot_count
+                FROM gex_snapshots
+                GROUP BY symbol
+                ORDER BY latest_timestamp DESC
+            """)
+            rows = cursor.fetchall()
+            result = []
+            for row in rows:
+                d = self._row_to_dict(row)
+                # 计算新鲜度 (分钟)
+                try:
+                    ts = d.get("latest_timestamp", "")
+                    if ts:
+                        from datetime import datetime as dt
+                        latest_dt = dt.fromisoformat(str(ts))
+                        age_minutes = (dt.now() - latest_dt).total_seconds() / 60
+                        d["age_minutes"] = round(age_minutes, 1)
+                except Exception:
+                    d["age_minutes"] = None
+                result.append(d)
+            return result
+        except Exception as e:
+            logger.error(f"查询GEX标的列表失败: {e}")
+            return []
+
+    def get_gex_snapshot_levels(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """获取某标的关键价位 (Zero Gamma / Call Wall / Put Wall)"""
+        try:
+            cursor = self.connection.execute("""
+                SELECT symbol, timestamp, spot_price,
+                       zero_gamma_level, call_wall, put_wall,
+                       net_gex
+                FROM gex_snapshots
+                WHERE symbol = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (symbol.upper(),))
+            row = cursor.fetchone()
+            return self._row_to_dict(row)
+        except Exception as e:
+            logger.error(f"查询GEX价位失败 ({symbol}): {e}")
+            return None
+
+    def get_gex_snapshot_summary(self) -> Dict[str, Any]:
+        """获取全局 GEXMetrix summary (从 gex_snapshots 表聚合)"""
+        try:
+            cursor = self.connection.execute("""
+                SELECT COUNT(DISTINCT symbol) as total_symbols,
+                       MAX(timestamp) as latest_update,
+                       COUNT(*) as total_snapshots
+                FROM gex_snapshots
+            """)
+            row = cursor.fetchone()
+            summary = self._row_to_dict(row) or {}
+
+            # 获取每个 symbol 的最新状态
+            symbols = self.get_gex_snapshot_symbols()
+            summary["symbols"] = symbols
+            return summary
+        except Exception as e:
+            logger.error(f"查询GEX summary失败: {e}")
+            return {"total_symbols": 0, "symbols": []}
+
+    def clean_old_gex_snapshots(self, symbol: str, keep: int = 50) -> int:
+        """清理旧快照，每个标的保留最近 N 个"""
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    DELETE FROM gex_snapshots
+                    WHERE symbol = ?
+                      AND id NOT IN (
+                        SELECT id FROM gex_snapshots
+                        WHERE symbol = ?
+                        ORDER BY timestamp DESC
+                        LIMIT ?
+                      )
+                """, (symbol.upper(), symbol.upper(), keep))
+                deleted = cursor.rowcount
+            if deleted > 0:
+                logger.debug(f"清理GEX旧快照 {symbol}: {deleted} 条")
+            return deleted
+        except Exception as e:
+            logger.error(f"清理GEX快照失败 ({symbol}): {e}")
+            return 0
+
+    # ============================================================
     # F. 数据库维护
     # ============================================================
     

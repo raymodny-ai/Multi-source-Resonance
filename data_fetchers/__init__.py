@@ -33,6 +33,7 @@ from data_fetchers.squeezemetrics_fetcher import SqueezeMetricsFetcher, create_s
 from data_fetchers.finra_fetcher import FINRAFetcher, create_finra_fetcher
 from data_fetchers.stockgrid_fetcher import StockgridFetcher, create_stockgrid_fetcher
 from data_fetchers.dbmf_fetcher import DBMFFetcher, create_dbmf_fetcher
+from data_fetchers.gexmetrix_fetcher import GEXMetrixFetcher, create_gexmetrix_fetcher
 from data_fetchers.batch_loader import (
     BatchDataLoader,
     ArchiveManager,
@@ -59,6 +60,8 @@ __all__ = [
     'create_stockgrid_fetcher',
     'DBMFFetcher',
     'create_dbmf_fetcher',
+    'GEXMetrixFetcher',
+    'create_gexmetrix_fetcher',
     # P2-2: 批量数据框架
     'BatchDataLoader',
     'ArchiveManager',

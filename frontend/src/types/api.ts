@@ -127,6 +127,51 @@ export interface GEXCurve {
   flip_zone_upper: number[]
 }
 
+// --- GEXMetrix Gamma Dashboard ---
+export interface GEXSymbolStatus {
+  symbol: string
+  latest_timestamp: string
+  snapshot_count: number
+  age_minutes: number | null
+}
+
+export interface GEXLatest {
+  symbol: string
+  timestamp: string
+  net_gex: number | null
+  call_gex: number | null
+  put_gex: number | null
+  zero_gamma_level: number | null
+  call_wall: number | null
+  put_wall: number | null
+  spot_price: number | null
+  total_gamma: number | null
+  file_size: number | null
+}
+
+export interface GEXMetrixHistoryPoint {
+  timestamp: string
+  net_gex: number | null
+  spot_price: number | null
+}
+
+export interface GEXLevels {
+  symbol: string
+  timestamp: string
+  zero_gamma_level: number | null
+  call_wall: number | null
+  put_wall: number | null
+  spot_price: number | null
+  net_gex: number | null
+}
+
+export interface GEXSummary {
+  total_symbols: number
+  latest_update: string | null
+  total_snapshots: number
+  symbols: GEXSymbolStatus[]
+}
+
 // --- 历史序列数据 ---
 export interface HistoryDataPoint {
   timestamp: string

@@ -138,7 +138,33 @@ ORDER BY timestamp DESC
 LIMIT 1;
 
 -- ============================================================
--- 表5: gateway_snapshots (V2.0 网关快照表)
+-- 表5: gex_snapshots (GEXMetrix 期权市场结构快照表)
+-- 存储 GEXMetrix API 返回的快照关键指标摘要，完整 JSON 保留在文件系统。
+-- 每个 symbol 保留最近 50 个快照。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS gex_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,              -- 标的代码 (SPX, SPY, QQQ, ...)
+    timestamp DATETIME NOT NULL,       -- 快照时间戳
+    filename TEXT NOT NULL,            -- 原始 JSON 文件名
+    net_gex REAL,                      -- 净 Gamma Exposure
+    call_gex REAL,                     -- Call 端 Gamma 总值
+    put_gex REAL,                      -- Put 端 Gamma 总值
+    zero_gamma_level REAL,            -- 零 Gamma 价位
+    call_wall REAL,                    -- Call Wall 行权价
+    put_wall REAL,                     -- Put Wall 行权价
+    spot_price REAL,                   -- 现货价格
+    total_gamma REAL,                  -- 总 Gamma
+    file_size INTEGER,                 -- 文件大小 (bytes)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gex_snap_symbol ON gex_snapshots(symbol);
+CREATE INDEX IF NOT EXISTS idx_gex_snap_timestamp ON gex_snapshots(symbol, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_gex_snap_created ON gex_snapshots(created_at DESC);
+
+-- ============================================================
+-- 表6: gateway_snapshots (V2.0 网关快照表)
 -- 存储每日穿过 Layer 2 网关的 JSON 快照，用于审计和回测
 -- ============================================================
 CREATE TABLE IF NOT EXISTS gateway_snapshots (
@@ -167,7 +193,7 @@ ORDER BY trigger_time DESC;
 
 
 -- ============================================================
--- 表6: validation_audit_log (V2.0 数据校验审计日志表)
+-- 表7: validation_audit_log (V2.0 数据校验审计日志表)
 -- 持久化存储所有因 Pandera/Greeks/Parity/Arbitrage/IF 校验
 -- 失败的数据记录，满足 PRD §不可变审计日志 要求。
 -- ============================================================

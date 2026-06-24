@@ -6,7 +6,7 @@ v2.2: 纯手动采集架构
 - ⚠ 所有自动数据采集已完全禁用
 - EventBus + SignalPipeline 在后台运行 (用于评分入库)
 - POST /api/system/collect-manual 为唯一数据获取入口
-- 6 数据源: GEX/DIX, VIX, AXLFI暗盘, DBMF, 加密衍生品, 做空数据
+- 7 数据源: GEX/DIX, VIX, AXLFI暗盘, DBMF, 加密衍生品, 做空数据, GEXMetrix
 - OpenCLAW 风格结构化日志输出到 Web 终端
 """
 import sys
@@ -193,6 +193,139 @@ async def darkpool_history(days: int = Query(90), ticker: str = Query("SPY")):
     return [_darkpool_row(r) for r in rows]
 
 
+# ==================== GEXMetrix Gamma Dashboard ====================
+@app.get("/api/gex/symbols")
+async def gex_symbols():
+    """获取所有 GEXMetrix 可用标的及数据新鲜度
+
+    Returns:
+        list: 每个标的最新快照时间、数据年龄(分钟)、快照数量
+    """
+    try:
+        symbols = db.get_gex_snapshot_symbols()
+        result = []
+        for s in symbols:
+            result.append({
+                "symbol": s.get("symbol", ""),
+                "latest_timestamp": str(s.get("latest_timestamp", "")),
+                "snapshot_count": s.get("snapshot_count", 0),
+                "age_minutes": s.get("age_minutes"),
+            })
+        return result
+    except Exception as e:
+        logger.error(f"GEX symbols 查询失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gex/summary")
+async def gex_summary():
+    """获取 GEXMetrix 全局摘要状态
+
+    Returns:
+        dict: total_symbols, latest_update, total_snapshots, symbols 列表
+    """
+    try:
+        return db.get_gex_snapshot_summary()
+    except Exception as e:
+        logger.error(f"GEX summary 查询失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gex/{symbol}/latest")
+async def gex_symbol_latest(symbol: str):
+    """获取指定标的最新 GEX 关键指标 (精简数据, 不返回原始 JSON)
+
+    对于大标 (SPX/SPY/QQQ), 只返回解析后的精简数据以节省带宽。
+
+    Args:
+        symbol: 标的代码 (如 SPX, SPY, QQQ, NDX 等)
+
+    Returns:
+        dict: net_gex, call_gex, put_gex, zero_gamma_level,
+              call_wall, put_wall, spot_price, total_gamma, timestamp
+    """
+    try:
+        snapshot = db.get_gex_snapshot_latest(symbol)
+        if not snapshot:
+            raise HTTPException(status_code=404, detail=f"No data for symbol: {symbol}")
+
+        return {
+            "symbol": snapshot.get("symbol", symbol.upper()),
+            "timestamp": str(snapshot.get("timestamp", "")),
+            "net_gex": snapshot.get("net_gex"),
+            "call_gex": snapshot.get("call_gex"),
+            "put_gex": snapshot.get("put_gex"),
+            "zero_gamma_level": snapshot.get("zero_gamma_level"),
+            "call_wall": snapshot.get("call_wall"),
+            "put_wall": snapshot.get("put_wall"),
+            "spot_price": snapshot.get("spot_price"),
+            "total_gamma": snapshot.get("total_gamma"),
+            "file_size": snapshot.get("file_size"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GEX latest 查询失败 ({symbol}): {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gex/{symbol}/history")
+async def gex_symbol_history(symbol: str, days: int = Query(7, ge=1, le=90)):
+    """获取指定标的历史 Net GEX 时间序列
+
+    Args:
+        symbol: 标的代码
+        days: 查询天数 (1-90, 默认 7)
+
+    Returns:
+        list: 按时间升序的 [timestamp, net_gex, spot_price] 序列
+    """
+    try:
+        rows = db.get_gex_snapshot_history(symbol, days)
+        result = []
+        for r in rows:
+            result.append({
+                "timestamp": str(r.get("timestamp", "")),
+                "net_gex": r.get("net_gex"),
+                "spot_price": r.get("spot_price"),
+            })
+        return result
+    except Exception as e:
+        logger.error(f"GEX history 查询失败 ({symbol}, {days}d): {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gex/{symbol}/levels")
+async def gex_symbol_levels(symbol: str):
+    """获取指定标的关键价位 (Zero Gamma / Call Wall / Put Wall)
+
+    Args:
+        symbol: 标的代码
+
+    Returns:
+        dict: zero_gamma_level, call_wall, put_wall, spot_price, net_gex, timestamp
+    """
+    try:
+        levels = db.get_gex_snapshot_levels(symbol)
+        if not levels:
+            raise HTTPException(status_code=404, detail=f"No levels data for symbol: {symbol}")
+
+        return {
+            "symbol": levels.get("symbol", symbol.upper()),
+            "timestamp": str(levels.get("timestamp", "")),
+            "zero_gamma_level": levels.get("zero_gamma_level"),
+            "call_wall": levels.get("call_wall"),
+            "put_wall": levels.get("put_wall"),
+            "spot_price": levels.get("spot_price"),
+            "net_gex": levels.get("net_gex"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GEX levels 查询失败 ({symbol}): {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== Cross-Asset & Resonance History ====================
 @app.get("/api/dashboard/cross-asset-heatmap")
 async def cross_asset_heatmap():
@@ -362,10 +495,11 @@ async def set_auto_polling(req: AutoPollingRequest):
 
 @app.post("/api/system/collect-manual")
 async def manual_collect():
-    """手动触发一次完整的 6 数据源采集循环
+    """手动触发一次完整的 7 数据源采集循环
     
     采集维度: GEX/DIX, VIX 期限结构, AXLFI 暗盘, DBMF 均线,
-              加密衍生品 (Hyperliquid→CCData), 做空数据 (yfinance→FINRA)
+              加密衍生品 (Hyperliquid→CCData), 做空数据 (yfinance→FINRA),
+              GEXMetrix Gamma Dashboard
     
     数据流: RESTPollScheduler → EventBus → SignalPipeline → 评分 → DB 入库
     
@@ -423,7 +557,7 @@ async def source_status():
     else:
         # 尚未执行过手动采集 — 显示待采集状态
         default_sources = [
-            "GEX/DIX", "VIX期限结构", "AXLFI暗盘", "DBMF均线", "加密衍生品", "做空数据",
+            "GEX/DIX", "VIX期限结构", "AXLFI暗盘", "DBMF均线", "加密衍生品", "做空数据", "GEXMetrix",
         ]
         sources = [
             {"name": name, "status": "DEGRADED", "method": "MANUAL",
@@ -841,7 +975,7 @@ async def startup_event():
         # 6. RESTPollScheduler 初始化 (每日批量采集由 main_stream.py 启动)
         #    手动采集通过 run_once_manual_collect() 触发
         _rest_scheduler._load_fetchers()
-        logger.info("  ✓ RESTPollScheduler 已就绪 (6 数据源, 每日批量 + 手动触发)")
+        logger.info("  ✓ RESTPollScheduler 已就绪 (7 数据源, 每日批量 + 手动触发)")
 
         logger.info("-" * 54)
         logger.info("  ⚠ 盘中轮询已移除 — 使用每日美东 20:00 批量采集 + 手动触发")

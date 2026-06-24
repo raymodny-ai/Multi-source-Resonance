@@ -65,6 +65,12 @@ class Config:
     SQUEEZEMETRICS_API_KEY: str = os.getenv('SQUEEZEMETRICS_API_KEY', '')
     SQUEEZEMETRICS_BASE_URL: str = 'https://api.squeezemetrics.com'
     
+    # GEXMetrix API配置 (Gamma Dashboard 期权市场结构数据)
+    GEXMETRIX_API_KEY: str = os.getenv('GEXMETRIX_API_KEY', '')
+    GEXMETRIX_SESSION_TOKEN: str = os.getenv('GEXMETRIX_SESSION_TOKEN', '')
+    GEXMETRIX_USER_EMAIL: str = os.getenv('GEXMETRIX_USER_EMAIL', '')
+    GEXMETRIX_API_BASE: str = os.getenv('GEXMETRIX_API_BASE', 'https://api.gexmetrix.com')
+    
     # ==================== LLM 推理配置 (V2.0 Layer 3) ====================
     
     # LLM Provider 选择: 'openai' / 'anthropic' / 'local'
@@ -277,6 +283,9 @@ class Config:
         
         if not cls.COINGLASS_API_KEY:
             warnings.append("COINGLASS_API_KEY未配置 (已弃用, 保留兼容)")
+        
+        if not cls.GEXMETRIX_API_KEY:
+            warnings.append("GEXMETRIX_API_KEY未配置, Gamma Dashboard数据获取将不可用")
         
         # yfinance 做空数据 (免费, 无需API Key)
         try:
