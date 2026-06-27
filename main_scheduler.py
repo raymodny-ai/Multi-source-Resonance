@@ -228,17 +228,30 @@ class MainScheduler:
         )
         
         # 任务4: 更新校准系数α (美东21:00)
+        # SqueezeMetrics 源, 写入 system_config.alpha_factor (全局单值)
         self.scheduler.add_job(
             self.task_update_alpha,
             trigger='cron',
             hour='21',
             minute='0',
             id='update_alpha',
-            name='更新GEX校准系数',
+            name='更新GEX校准系数(SqueezeMetrics)',
             misfire_grace_time=3600
         )
-        
-        # 任务5: 备份数据库 (美东21:30)
+
+        # 任务5: GEXMetrix 源, 20 日 EWM per-symbol (v2.4 alpha_calibrator)
+        # 21:05 跑 (避开 任务4 同时读写 gex_snapshots)
+        self.scheduler.add_job(
+            self.task_calibrate_gexmetrix_alpha,
+            trigger='cron',
+            hour='21',
+            minute='5',
+            id='update_alpha_gexmetrix',
+            name='更新GEX校准系数(GEXMetrix, v2.4 EWM)',
+            misfire_grace_time=3600
+        )
+
+        # 任务6: 备份数据库 (美东21:30)
         self.scheduler.add_job(
             self.task_backup_database,
             trigger='cron',
@@ -249,7 +262,7 @@ class MainScheduler:
             misfire_grace_time=3600
         )
         
-        logger.info("盘后批量任务设置完成(共5个)")
+        logger.info("盘后批量任务设置完成(共6个)")
     
     async def task_calculate_gex(self):
         """任务: 获取 SqueezeMetrics GEX+DIX 指标
@@ -956,7 +969,54 @@ class MainScheduler:
         except Exception as e:
             logger.error(f"α系数更新任务失败: {e}", exc_info=True)
             self.fallback_manager.record_failure('task_update_alpha')
-    
+
+    async def task_calibrate_gexmetrix_alpha(self):
+        """任务: GEXMetrix 源 alpha 校准 (v2.4)
+
+        与 task_update_alpha 并行运行 (21:00 vs 21:05):
+        - task_update_alpha (SqueezeMetrics): 全局单值 system_config.alpha_factor
+        - task_calibrate_gexmetrix_alpha (GEXMetrix): per-symbol EWM 20 日
+          alpha_history 表, 由 get_effective_alpha() 热路径查询
+
+        设计理由: 两条路径独立, 任一失败不影响另一条。
+        GEXMetrix 路径提供更精细的 per-symbol 校准 (alpha_history)。
+        """
+        try:
+            logger.info("开始执行 GEXMetrix alpha 校准任务 (v2.4)")
+            loop = asyncio.get_event_loop()
+
+            from quant_logic.alpha_calibrator import AlphaCalibrator
+            from data_fetchers.gexmetrix_fetcher import GEXMetrixFetcher
+
+            # 核心标的列表 (与 GEXMetrixFetcher.CORE_SYMBOLS 一致)
+            symbols = GEXMetrixFetcher.CORE_SYMBOLS
+
+            def _run_calibration():
+                cal = AlphaCalibrator()
+                return cal.run_eod_batch(symbols)
+
+            results = await loop.run_in_executor(self.executor, _run_calibration)
+
+            # 汇总
+            ok = sum(1 for r in results if r is not None)
+            logger.info(
+                f"GEXMetrix alpha 校准完成: {ok}/{len(symbols)} 标的成功"
+            )
+            for r in results:
+                if r:
+                    logger.info(
+                        f"  {r['symbol']}: alpha={r['alpha']:.4f}, "
+                        f"ewm20={r['ewm_alpha_20d']:.4f}, "
+                        f"local={r['local_gex']:.2e}, ref={r['reference_gex']:.2e}"
+                    )
+
+            # 成功后重置失败计数
+            self.fallback_manager.reset_failure_count('task_calibrate_gexmetrix_alpha')
+
+        except Exception as e:
+            logger.error(f"GEXMetrix alpha 校准任务失败: {e}", exc_info=True)
+            self.fallback_manager.record_failure('task_calibrate_gexmetrix_alpha')
+
     async def task_backup_database(self):
         """任务: 备份数据库
         
