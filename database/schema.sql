@@ -231,3 +231,20 @@ SELECT
 FROM validation_audit_log
 GROUP BY snapshot_date, pipeline_run_id
 ORDER BY snapshot_date DESC;
+
+-- ============================================================
+-- VIX 期限结构分析表
+-- ============================================================
+CREATE TABLE IF NOT EXISTS vix_analysis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    vix_spot REAL DEFAULT 0,
+    vx1 REAL DEFAULT 0,
+    vx2 REAL DEFAULT 0,
+    term_structure_ratio REAL DEFAULT 1.0,
+    term_structure_state TEXT DEFAULT 'NEUTRAL',
+    panic_premium REAL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_vix_analysis_ts ON vix_analysis(timestamp DESC);

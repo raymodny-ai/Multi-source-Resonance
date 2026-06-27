@@ -1467,6 +1467,42 @@ class DatabaseManager:
             logger.error(f"获取数据库统计信息失败: {e}")
             return {}
     
+    @staticmethod
+    def _to_float(v, default=0.0) -> float:
+        """安全转 float，兼容 dict/list 等异常类型"""
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            try:
+                return float(v)
+            except ValueError:
+                return default
+        if isinstance(v, dict):
+            # dict 本身不能转 float，尝试提取常见字段
+            for key in ('premium_pct', 'premium_ratio', 'value', 'price', 'close', 'settle', 'vix_spot', 'spot'):
+                if key in v:
+                    return DatabaseManager._to_float(v[key], default)
+            return default
+        return default
+
+    def insert_vix_analysis(self, timestamp, vix_spot, vx1, vx2, ratio, state, panic_premium):
+        """写入VIX期限结构分析结果"""
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO vix_analysis
+                       (timestamp, vix_spot, vx1, vx2, term_structure_ratio, term_structure_state, panic_premium)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
+                     self._to_float(vix_spot), self._to_float(vx1), self._to_float(vx2),
+                     self._to_float(ratio), str(state), self._to_float(panic_premium))
+                )
+            logger.info(f"VIX分析写入: ratio={self._to_float(ratio):.4f}, state={state}")
+            return True
+        except Exception as e:
+            logger.error(f"VIX分析写入失败: {e}", exc_info=True)
+            return False
+
     def get_latest_vix_analysis(self):
         """获取最新VIX分析记录"""
         try:
