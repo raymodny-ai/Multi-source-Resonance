@@ -148,6 +148,9 @@ class GEXMetrixFetcher:
         else:
             filename = f"snapshot_{int(time.time())}.json"
 
+        filepath = symbol_dir / filename
+        return self.save_json(data, filepath)
+
     def _enrich_with_quality(self, symbol: str, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """v2.3: 对单条快照跑数据质量验证, 失败时返回中性默认值
 
@@ -162,9 +165,6 @@ class GEXMetrixFetcher:
                 'zero_oi_pct': 0.0, 'issues': ['validator_unavailable'],
             }
         return validate_after_fetch(symbol, raw_data)
-
-        filepath = symbol_dir / filename
-        return self.save_json(data, filepath)
 
     def update_summary(self, success_list: List[dict]) -> Path:
         """更新全局 summary.json"""
