@@ -1,5 +1,8 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
-import { useGEXSymbols, useGEXLatest, useGEXHistory, useGEXLevels, useGEXSummary } from '../api/gexmetrix'
+import { useGEXSymbols, useGEXLatest, useGEXHistory, useGEXLevels, useGEXSummary, useGEXStrikes, useGEXDashboardView } from '../api/gexmetrix'
+
+// C: BFF 模式开关 - true=用聚合接口, false=6 个独立 hook
+const USE_BFF_DASHBOARD = true
 import { useStalenessStore } from '../stores/stalenessStore'
 import { useTimezoneStore } from '../stores/timezoneStore'
 import { formatCurrency, formatCompact } from '../utils/format'
@@ -63,10 +66,11 @@ function formatAge(ageMinutes: number | null): string {
 function formatGEX(value: number | null): string {
   if (value == null) return '--'
   const abs = Math.abs(value)
-  if (abs >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`
-  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
-  if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}K`
-  return value.toFixed(0)
+  if (abs >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`
+  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`
+  if (abs >= 1_000) return `${(value / 1_000).toFixed(2)}K`
+  // 小于 1k 的值限制为 2 位小数，防止超高精度数字撑破 Tooltip
+  return value.toFixed(2)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -82,16 +86,42 @@ export default function GammaDashboard() {
   const [sortKey, setSortKey] = useState<'symbol' | 'net_gex' | 'age'>('symbol')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [autoRefresh, setAutoRefresh] = useState(true)
+  // 一.1: 仅 SPX 支持 90 天 SqueezeMetrics 历史, 非 SPX 强制上限 3 天 (GEXMetrix 边界)
+  const HISTORY_LONG_THRESHOLD = 3
+  const isLongHistory = historyDays > HISTORY_LONG_THRESHOLD
+  const longHistoryRequiresSPX = selectedSymbol !== 'SPX' && isLongHistory
+  const [longHistoryNotice, setLongHistoryNotice] = useState<string | null>(null)
   const lastRefreshRef = useRef<number>(Date.now())
+
+  useEffect(() => {
+    if (longHistoryRequiresSPX) {
+      setHistoryDays(HISTORY_LONG_THRESHOLD)
+      setLongHistoryNotice(
+        `${selectedSymbol} 仅支持 ${HISTORY_LONG_THRESHOLD} 天历史 (GEXMetrix 数据边界)。仅 SPX 支持 90 天 (SqueezeMetrics)。`,
+      )
+      const t = setTimeout(() => setLongHistoryNotice(null), 5000)
+      return () => clearTimeout(t)
+    }
+  }, [longHistoryRequiresSPX, selectedSymbol])
 
   // ── 数据查询 ──
   const { data: symbols, isLoading: symLoading } = useGEXSymbols()
   const { data: summary } = useGEXSummary()
-  const { data: latest, isLoading: latestLoading } = useGEXLatest(selectedSymbol)
+  const { data: latest, isLoading: latestLoading, isError: latestError, error: latestErrorObj } = useGEXLatest(selectedSymbol)
   const { data: history, isLoading: histLoading } = useGEXHistory(selectedSymbol, historyDays)
   const { data: levels, isLoading: lvlsLoading } = useGEXLevels(selectedSymbol)
+  // B: 真实逐 strike 数据
+  const { data: strikesResp, isLoading: strikesLoading } = useGEXStrikes(selectedSymbol, 200)
 
-  // ── 跟踪新鲜度 ──
+  // C: BFF 聚合接口 (单次调用拿到全部数据)
+  const bffResp = useGEXDashboardView(
+    selectedSymbol,
+    { history_days: 3, long_days: 90, strikes_limit: 200 }
+  )
+  const bffView = bffResp.data
+  const bffLoading = bffResp.isLoading
+
+  // ── 跟踪新鲜度 (三.2: 失败时也要同步 lastRefreshRef 并降级 UI) ──
   useEffect(() => {
     if (latest?.timestamp) {
       updateSource('gexmetrix', new Date(latest.timestamp).getTime())
@@ -109,6 +139,7 @@ export default function GammaDashboard() {
   }, [autoRefresh])
 
   // ── 排序后的标的列表 ──
+  // 三.3: 移除 net_gex dead branch (UI 不暴露该选项, 留着是 dead code)
   const sortedSymbols = useMemo(() => {
     if (!symbols) return []
     const list = [...symbols]
@@ -135,16 +166,40 @@ export default function GammaDashboard() {
     }))
   }, [history])
 
-  // ── 行权价分布模拟数据 (当 real strikes unavailable 时) ──
+  // ── 行权价分布数据 (C: 优先 BFF, B: 真实 strikes, fallback 到 levels 派生) ──
   const strikesData = useMemo(() => {
-    const levels_data = levels
+    const levels_data = bffView?.levels ?? levels
     const spot = levels_data?.spot_price ?? 5000
     const callWall = levels_data?.call_wall ?? spot * 1.05
     const putWall = levels_data?.put_wall ?? spot * 0.95
     const zeroGamma = levels_data?.zero_gamma_level ?? spot
 
+    // C: 优先用 BFF 真实 strikes; B: 回退到 useGEXStrikes hook
+    const bffStrikes = bffView?.strikes?.strikes
+    const hookStrikes = strikesResp?.strikes
+    const realStrikes =
+      bffStrikes && bffStrikes.length > 0
+        ? bffStrikes
+        : hookStrikes && hookStrikes.length > 0
+        ? hookStrikes
+        : null
+    const realSpot = bffView?.strikes?.spot_price ?? spot
+
+    if (realStrikes) {
+      return {
+        strikes: realStrikes,
+        zeroGamma,
+        callWall,
+        putWall,
+        spot: realSpot,
+        isReal: true,
+        source: bffStrikes ? 'bff' : 'hook',
+      }
+    }
+
+    // fallback: 从 levels 派生 (向后兼容)
     const strikes: { strike: number; call_gex: number; put_gex: number }[] = []
-    const step = spot * 0.005 // 0.5% step
+    const step = spot * 0.005
     for (let s = spot * 0.85; s <= spot * 1.15; s += step) {
       const distCall = s - callWall
       const distPut = putWall - s
@@ -153,11 +208,11 @@ export default function GammaDashboard() {
       strikes.push({
         strike: Math.round(s),
         call_gex: Math.round(callVal),
-        put_gex: -Math.round(putVal), // 负方向
+        put_gex: -Math.round(putVal),
       })
     }
-    return { strikes, zeroGamma, callWall, putWall, spot }
-  }, [levels])
+    return { strikes, zeroGamma, callWall, putWall, spot, isReal: false, source: 'simulated' }
+  }, [levels, strikesResp, bffView])
 
   const spotPrice = levels?.spot_price
   const spotPriceDeviation =
@@ -213,9 +268,19 @@ export default function GammaDashboard() {
           )}`}
         />
 
-        {/* 最后刷新 */}
-        <span className="text-xs text-[var(--text-secondary)]">
-          刷新于 {lastRefreshRef.current ? formatTime(new Date(lastRefreshRef.current).toISOString(), timezone) : '--'}
+        {/* 最后刷新 (三.2: 失败时显示错误态) */}
+        <span
+          className="text-xs"
+          style={{
+            color: latestError
+              ? 'var(--accent-red, #ef4444)'
+              : 'var(--text-secondary)',
+          }}
+          title={latestError ? `API 错误: ${latestErrorObj?.message ?? '未知'}` : undefined}
+        >
+          {latestError
+            ? '⚠ 请求失败'
+            : `刷新于 ${formatTime(new Date(lastRefreshRef.current).toISOString(), timezone)}`}
         </span>
 
         {/* 刷新按钮 */}
@@ -305,6 +370,32 @@ export default function GammaDashboard() {
             <h3 className="text-xs font-semibold text-[var(--text-primary)] mb-3">
               GEX 行权价分布 — {selectedSymbol}
               {spotPrice && <span className="ml-2 text-[var(--text-secondary)]">现货 @ {spotPrice.toFixed(0)}</span>}
+              {/* B: 真实数据时绿色 ✓ 徽章, fallback 到模拟时黄色 ⚠ 徽章 */}
+              {strikesData.isReal ? (
+                <span
+                  className="ml-2 px-1.5 py-0.5 rounded text-[9px] font-bold"
+                  style={{
+                    backgroundColor: 'rgba(34, 197, 94, 0.15)',
+                    color: '#22c55e',
+                    border: '1px solid rgba(34, 197, 94, 0.4)',
+                  }}
+                  title={`真实 OI × Gamma 数据, ${strikesData.strikes.length} 个 strike`}
+                >
+                  ✓ 真实数据
+                </span>
+              ) : (
+                <span
+                  className="ml-2 px-1.5 py-0.5 rounded text-[9px] font-bold"
+                  style={{
+                    backgroundColor: 'rgba(234, 179, 8, 0.15)',
+                    color: '#eab308',
+                    border: '1px solid rgba(234, 179, 8, 0.4)',
+                  }}
+                  title="GEXMetrix 无逐 strike 数据, 此柱状图为高斯模拟, 非真实 OI 分布"
+                >
+                  ⚠ 模拟数据
+                </span>
+              )}
             </h3>
             <ResponsiveContainer width="100%" height="90%">
               <BarChart
@@ -330,11 +421,11 @@ export default function GammaDashboard() {
                     fontSize: '12px',
                     color: 'var(--text-primary)',
                   }}
-                  formatter={(value: number, name: string) => [
-                    formatCurrency(Math.abs(value)),
+                  formatter={((value: unknown, name: unknown) => [
+                    formatCurrency(Math.abs(Number(value))),
                     name === 'call_gex' ? 'Call GEX' : 'Put GEX',
-                  ]}
-                  labelFormatter={(label: number) => `行权价: ${label}`}
+                  ]) as never}
+                  labelFormatter={((label: unknown) => `行权价: ${label}`) as never}
                 />
                 <Bar dataKey="call_gex" fill={POS_GAMMA} name="call_gex" radius={[1, 1, 0, 0]} />
                 <Bar dataKey="put_gex" fill={NEG_GAMMA} name="put_gex" radius={[1, 1, 0, 0]} />
@@ -380,6 +471,18 @@ export default function GammaDashboard() {
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-xs font-semibold text-[var(--text-primary)]">
                 Net GEX 历史走势 — {selectedSymbol}
+                {longHistoryNotice && (
+                  <span
+                    className="ml-2 px-1.5 py-0.5 rounded text-[9px] font-bold"
+                    style={{
+                      backgroundColor: 'rgba(59, 130, 246, 0.15)',
+                      color: '#3b82f6',
+                      border: '1px solid rgba(59, 130, 246, 0.4)',
+                    }}
+                  >
+                    ℹ {longHistoryNotice}
+                  </span>
+                )}
               </h3>
               <select
                 value={historyDays}

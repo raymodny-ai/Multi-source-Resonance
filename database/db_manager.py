@@ -1232,6 +1232,37 @@ class DatabaseManager:
             logger.error(f"插入GEX快照失败 ({symbol}): {e}")
             return False
 
+
+    def _create_gex_strikes_table(self):
+        """B: gex_strikes 表 - 逐 strike 真实 GEX/OI 分布
+
+        与 gex_snapshots 通过 (symbol, timestamp) 关联。
+        单一 snapshot 可能对应数百行 strikes (按 strike + cp 分开)。
+        """
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS gex_strikes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        snapshot_id INTEGER NOT NULL,
+                        symbol TEXT NOT NULL,
+                        timestamp DATETIME NOT NULL,
+                        strike REAL NOT NULL,
+                        call_gex REAL NOT NULL DEFAULT 0,
+                        put_gex REAL NOT NULL DEFAULT 0,
+                        call_oi INTEGER NOT NULL DEFAULT 0,
+                        put_oi INTEGER NOT NULL DEFAULT 0,
+                        call_vol INTEGER NOT NULL DEFAULT 0,
+                        put_vol INTEGER NOT NULL DEFAULT 0,
+                        net_gex REAL NOT NULL DEFAULT 0,
+                        FOREIGN KEY (snapshot_id) REFERENCES gex_snapshots(id) ON DELETE CASCADE
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_gex_strikes_sym_ts ON gex_strikes (symbol, timestamp DESC)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_gex_strikes_snap ON gex_strikes (snapshot_id)")
+        except Exception as e:
+            logger.error(f"创建 gex_strikes 表失败: {e}")
+
     def get_gex_snapshot_latest(self, symbol: str) -> Optional[Dict[str, Any]]:
         """获取某标的最新 GEX 快照"""
         try:
@@ -1246,6 +1277,138 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"查询GEX快照失败 ({symbol}): {e}")
             return None
+
+
+
+    def insert_gex_strikes(
+        self,
+        snapshot_id: int,
+        symbol: str,
+        timestamp: str,
+        strikes: List[Dict[str, Any]],
+    ) -> int:
+        """B: 批量插入逐 strike 数据
+
+        Args:
+            snapshot_id: gex_snapshots.id 外键
+            symbol: 标的代码
+            timestamp: 快照时间 (ISO 格式)
+            strikes: parse_strikes() 输出 [{strike, call_gex, put_gex, call_oi, ...}, ...]
+
+        Returns:
+            插入的行数
+        """
+        if not strikes:
+            return 0
+        try:
+            with self._get_cursor() as cursor:
+                # 先删除同 snapshot 的旧 strikes (幂等)
+                cursor.execute(
+                    "DELETE FROM gex_strikes WHERE snapshot_id = ?",
+                    (snapshot_id,),
+                )
+                rows = [
+                    (
+                        snapshot_id,
+                        symbol.upper(),
+                        timestamp,
+                        float(s["strike"]),
+                        float(s["call_gex"]),
+                        float(s["put_gex"]),
+                        int(s["call_oi"]),
+                        int(s["put_oi"]),
+                        int(s.get("call_vol", 0)),
+                        int(s.get("put_vol", 0)),
+                        float(s.get("net_gex", s["call_gex"] + s["put_gex"])),
+                    )
+                    for s in strikes
+                ]
+                cursor.executemany(
+                    """INSERT INTO gex_strikes
+                    (snapshot_id, symbol, timestamp, strike, call_gex, put_gex,
+                     call_oi, put_oi, call_vol, put_vol, net_gex)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
+                return len(rows)
+        except Exception as e:
+            logger.error(f"插入 gex_strikes 失败 ({symbol}): {e}")
+            return 0
+
+    def get_gex_strikes(
+        self,
+        symbol: str,
+        snapshot_id: Optional[int] = None,
+        limit_strikes: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """B: 获取某标的最新 snapshot 的逐 strike 数据
+
+        Args:
+            symbol: 标的代码
+            snapshot_id: 指定 snapshot (None = 最新)
+            limit_strikes: 最多返回多少 strike (按 ATM 距离排序后取 limit)
+
+        Returns:
+            [{strike, call_gex, put_gex, call_oi, put_oi, ...}, ...]
+        """
+        try:
+            with self._get_cursor() as cursor:
+                if snapshot_id is None:
+                    # 找最新 snapshot
+                    cursor.execute(
+                        "SELECT id, timestamp, spot_price FROM gex_snapshots WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+                        (symbol.upper(),),
+                    )
+                    snap = cursor.fetchone()
+                    if not snap:
+                        return []
+                    snapshot_id = snap[0]
+                    snap_ts = snap[1]
+                    spot = snap[2]
+                else:
+                    cursor.execute(
+                        "SELECT timestamp, spot_price FROM gex_snapshots WHERE id = ?",
+                        (snapshot_id,),
+                    )
+                    snap = cursor.fetchone()
+                    if not snap:
+                        return []
+                    snap_ts = snap[0]
+                    spot = snap[1]
+
+                # 取所有 strikes, 在 Python 端按 ATM 距离裁剪
+                cursor.execute(
+                    "SELECT strike, call_gex, put_gex, call_oi, put_oi, call_vol, put_vol, net_gex FROM gex_strikes WHERE snapshot_id = ? ORDER BY strike ASC",
+                    (snapshot_id,),
+                )
+                rows = cursor.fetchall()
+                if not rows:
+                    return []
+
+                # 转为 dict
+                result = []
+                for r in rows:
+                    result.append({
+                        "strike": r[0],
+                        "call_gex": r[1],
+                        "put_gex": r[2],
+                        "call_oi": r[3],
+                        "put_oi": r[4],
+                        "call_vol": r[5],
+                        "put_vol": r[6],
+                        "net_gex": r[7],
+                    })
+
+                # 按 ATM 距离裁剪
+                if spot and len(result) > limit_strikes:
+                    result.sort(key=lambda s: abs(s["strike"] - spot))
+                    result = result[:limit_strikes]
+                    result.sort(key=lambda s: s["strike"])
+
+                return result
+        except Exception as e:
+            logger.error(f"查询 gex_strikes 失败 ({symbol}): {e}")
+            return []
 
     def get_gex_snapshot_history(
         self, symbol: str, days: int = 7

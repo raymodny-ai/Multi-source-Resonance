@@ -189,6 +189,147 @@ class GEXMetrixFetcher:
     # ==================== 关键指标解析 ====================
 
     @classmethod
+
+
+    @staticmethod
+    def _parse_occ_symbol(symbol: str) -> Optional[Dict[str, Any]]:
+        """解析 OCC 期权符号 (如 SPY260626C00708000) → {date, cp, strike}
+
+        OCC 格式: [underlying][YYMMDD][C/P][strike*1000 8位]
+        例: SPY260626C00708000 → SPY, 2026-06-26, Call, strike=708.0
+        """
+        import re
+        m = re.match(r"^([A-Z]+)(\d{6})([CP])(\d{8})$", symbol)
+        if not m:
+            return None
+        underlying, date, cp, strike_raw = m.groups()
+        try:
+            return {
+                "underlying": underlying,
+                "date": f"20{date[:2]}-{date[2:4]}-{date[4:6]}",
+                "cp": cp,
+                "strike": int(strike_raw) / 1000.0,
+            }
+        except (ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def parse_strikes(data: dict, min_oi: int = 100, multiplier: int = 100) -> List[Dict[str, Any]]:
+        """B: 从 GEXMetrix 快照 options[] 提取逐 strike 真实 GEX/OI 分布
+
+        Args:
+            data: GEXMetrix API 返回的完整快照 (三层嵌套 data.data.data.options)
+            min_oi: 最小 OI 阈值,过滤深度虚值(默认 100)
+            multiplier: 合约乘数 (SPY/QQQ/IWM=100, SPX 指数期权=100)
+
+        Returns:
+            按 strike 聚合的列表: [{strike, call_gex, put_gex, call_oi, put_oi, call_vol, put_vol}, ...]
+        """
+        from collections import defaultdict
+        try:
+            inner = data.get("data", data)
+            deep = inner.get("data", inner) if isinstance(inner, dict) else inner
+            if not isinstance(deep, dict):
+                return []
+            options = deep.get("options", [])
+            spot = (
+                deep.get("current_price")
+                or deep.get("spot_price")
+                or deep.get("close")
+                or 0
+            )
+            spot = float(spot) if spot else 0
+            if not options or not spot:
+                return []
+
+            # 按 strike 聚合 (call/put 分别)
+            agg: Dict[float, Dict[str, float]] = defaultdict(
+                lambda: {"call_gex": 0, "put_gex": 0, "call_oi": 0, "put_oi": 0, "call_vol": 0, "put_vol": 0}
+            )
+
+            for o in options:
+                if not isinstance(o, dict):
+                    continue
+                occ = GEXMetrixFetcher._parse_occ_symbol(o.get("option", ""))
+                if occ is None:
+                    continue
+                strike = occ["strike"]
+                cp = occ["cp"]
+                gamma = float(o.get("gamma") or 0)
+                oi = int(o.get("open_interest") or 0)
+                vol = int(o.get("volume") or 0)
+
+                # 过滤低 OI 合约
+                if oi < min_oi:
+                    continue
+                # 过滤 gamma=0 的废数据
+                if gamma == 0:
+                    continue
+
+                # GEX = gamma * OI * multiplier * spot^2 * 0.01
+                # (单位是美元, dealer 立场)
+                gex_value = gamma * oi * multiplier * spot * spot * 0.01
+
+                if cp == "C":
+                    agg[strike]["call_gex"] += gex_value
+                    agg[strike]["call_oi"] += oi
+                    agg[strike]["call_vol"] += vol
+                else:
+                    agg[strike]["put_gex"] += gex_value  # Put GEX 累加正数,前端渲染时取负
+                    agg[strike]["put_oi"] += oi
+                    agg[strike]["put_vol"] += vol
+
+            # 排序输出
+            result = []
+            for strike in sorted(agg.keys()):
+                a = agg[strike]
+                result.append({
+                    "strike": strike,
+                    "call_gex": round(a["call_gex"], 2),
+                    "put_gex": round(-a["put_gex"], 2),  # 负方向,前端习惯
+                    "call_oi": int(a["call_oi"]),
+                    "put_oi": int(a["put_oi"]),
+                    "call_vol": int(a["call_vol"]),
+                    "put_vol": int(a["put_vol"]),
+                    "net_gex": round(a["call_gex"] - a["put_gex"], 2),
+                })
+            return result
+
+        except Exception as e:
+            logger.error(f"parse_strikes 失败: {e}", exc_info=True)
+            return []
+
+    def extract_and_store_strikes(self, symbol: str, data: dict, db) -> int:
+        """B: 解析 + 存储逐 strike 数据到 gex_strikes 表
+
+        调用方:
+            fetcher = GEXMetrixFetcher()
+            data = fetcher.get_latest_file(symbol)
+            n = fetcher.extract_and_store_strikes(symbol, data, db)
+
+        Returns:
+            插入行数 (0 = 失败或无数据)
+        """
+        try:
+            strikes = self.parse_strikes(data, min_oi=100)
+            if not strikes:
+                return 0
+            # 找最新 snapshot_id
+            existing = db.get_gex_snapshot_latest(symbol)
+            if not existing:
+                logger.warning(f"  {symbol}: 无对应 gex_snapshots 记录, 跳过 strikes 存储")
+                return 0
+            return db.insert_gex_strikes(
+                snapshot_id=existing["id"],
+                symbol=symbol,
+                timestamp=existing.get("timestamp", ""),
+                strikes=strikes,
+            )
+        except Exception as e:
+            logger.error(f"extract_and_store_strikes 失败 ({symbol}): {e}", exc_info=True)
+            return 0
+
+
     def get_cached_metrics(cls, symbol: str, max_age_sec: int = 300) -> Optional[Dict[str, Any]]:
         """从内存缓存获取已解析的关键指标 (TTL 5分钟)
 

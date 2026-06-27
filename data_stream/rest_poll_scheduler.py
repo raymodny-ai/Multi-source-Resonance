@@ -650,6 +650,8 @@ class RESTPollScheduler:
                     pass
 
                 metrics = self._gexmetrix.parse_snapshot_key_metrics(raw) if raw else {}
+                # v2.5 (B): 解析逐 strike 真实数据
+                strikes = self._gexmetrix.parse_strikes(raw) if raw else []
 
                 try:
                     ts = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S") if timestamp_str else datetime.now()
@@ -660,6 +662,7 @@ class RESTPollScheduler:
                     "symbol": symbol,
                     "timestamp": ts.isoformat(),
                     "filename": filename,
+                    "strikes": strikes,  # v2.5 (B)
                     "net_gex": metrics.get("net_gex"),
                     "call_gex": metrics.get("call_gex"),
                     "put_gex": metrics.get("put_gex"),
@@ -890,11 +893,15 @@ class RESTPollScheduler:
 
 
 def db_insert_gex(snapshot: dict) -> None:
-    """独立函数用于线程池中写入 GEX 快照到数据库"""
+    """独立函数用于线程池中写入 GEX 快照到数据库
+
+    v2.5 (B): 同时插入逐 strike 数据到 gex_strikes 表
+    snapshot["strikes"] 来自 GEXMetrixFetcher.parse_strikes(raw_data)
+    """
     try:
         from database.db_manager import DatabaseManager
         db = DatabaseManager()
-        db.insert_gex_snapshot(
+        ok = db.insert_gex_snapshot(
             symbol=snapshot.get("symbol", ""),
             timestamp=snapshot.get("timestamp", datetime.now().isoformat()),
             filename=snapshot.get("filename", ""),
@@ -908,5 +915,19 @@ def db_insert_gex(snapshot: dict) -> None:
             total_gamma=snapshot.get("total_gamma"),
             file_size=snapshot.get("file_size", 0),
         )
+        if not ok:
+            return
+        # v2.5: 写逐 strike (若 fetcher 已解析)
+        strikes = snapshot.get("strikes") or []
+        if strikes:
+            # 拿到刚 insert 的 snapshot id
+            latest = db.get_gex_snapshot_latest(snapshot.get("symbol", ""))
+            if latest:
+                db.insert_gex_strikes(
+                    snapshot_id=latest["id"],
+                    symbol=snapshot.get("symbol", ""),
+                    timestamp=snapshot.get("timestamp", datetime.now().isoformat()),
+                    strikes=strikes,
+                )
     except Exception as e:
         logger.error(f"数据库写入 GEX 快照失败: {e}")

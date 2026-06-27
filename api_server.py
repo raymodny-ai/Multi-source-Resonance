@@ -326,6 +326,144 @@ async def gex_symbol_levels(symbol: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/gex/{symbol}/strikes")
+async def gex_symbol_strikes(symbol: str, limit: int = Query(200, ge=10, le=600)):
+    """B: 获取标的逐 strike 真实 GEX/OI 分布
+
+    Args:
+        symbol: 标的代码
+        limit: ATM 附近最多返回多少 strike (默认 200, 最大 600)
+
+    Returns:
+        dict: symbol, timestamp, spot_price, strikes[]
+        strikes[i]: {strike, call_gex, put_gex, call_oi, put_oi, call_vol, put_vol, net_gex}
+    """
+    try:
+        strikes = db.get_gex_strikes(symbol.upper(), snapshot_id=None, limit_strikes=limit)
+        if not strikes:
+            raise HTTPException(status_code=404, detail=f"No strike data for symbol: {symbol}")
+        # 取 snapshot 时间戳和 spot
+        snap = db.get_gex_snapshot_latest(symbol.upper())
+        ts = str(snap.get("timestamp", "")) if snap else ""
+        spot = snap.get("spot_price") if snap else None
+        return {
+            "symbol": symbol.upper(),
+            "timestamp": ts,
+            "spot_price": spot,
+            "strikes": strikes,
+            "strike_count": len(strikes),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GEX strikes 查询失败 ({symbol}): {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/gex/{symbol}/dashboard-view")
+async def gex_symbol_dashboard_view(
+    symbol: str,
+    history_days: int = Query(3, ge=1, le=7, description="历史 Net GEX 时间序列天数 (1-7, 仅 GEXMetrix 数据)"),
+    long_days: int = Query(90, ge=30, le=365, description="SqueezeMetrics 90天回填数据天数"),
+    strikes_limit: int = Query(200, ge=10, le=600),
+):
+    """C: BFF 聚合接口 - Gamma Dashboard 一次拿到全部数据
+
+    一次返回 5 类数据, 替代前端 5 个 useQuery:
+    1. latest: 最新 GEXMetrix 快照摘要 (net_gex/call_gex/put_gex/walls/spot)
+    2. levels: 关键价位 (call_wall/put_wall/zero_gamma/flip_zones)
+    3. history: GEXMetrix Net GEX 时间序列 (history_days)
+    4. long_history: SqueezeMetrics 90天日级 Net GEX (long_days)
+    5. strikes: 真实逐 strike 分布 (ATM 附近 strikes_limit 个)
+    6. symbols: 所有可用标的列表 + 数据新鲜度
+
+    Args:
+        symbol: 标的代码 (如 SPY)
+        history_days: GEXMetrix 短期窗口 (默认 3 天)
+        long_days: SqueezeMetrics 长期窗口 (默认 90 天)
+        strikes_limit: ATM 附近 strike 数量上限
+
+    Returns:
+        dict: { symbol, latest, levels, history, long_history, strikes, symbols, fetched_at }
+    """
+    try:
+        sym = symbol.upper()
+        result: Dict[str, Any] = {
+            "symbol": sym,
+            "fetched_at": datetime.now().isoformat(),
+        }
+
+        # 1. latest (gex_snapshots 最新一行)
+        try:
+            latest = db.get_gex_snapshot_latest(sym)
+            result["latest"] = latest
+        except Exception as e:
+            logger.warning(f"  {sym} latest 失败: {e}")
+            result["latest"] = None
+
+        # 2. levels (从 latest 提取关键价位)
+        if result["latest"]:
+            r = result["latest"]
+            result["levels"] = {
+                "call_wall": r.get("call_wall"),
+                "put_wall": r.get("put_wall"),
+                "zero_gamma_level": r.get("zero_gamma_level"),
+                "spot_price": r.get("spot_price"),
+                "net_gex": r.get("net_gex"),
+                "call_gex": r.get("call_gex"),
+                "put_gex": r.get("put_gex"),
+            }
+        else:
+            result["levels"] = None
+
+        # 3. history (gex_snapshots 时间序列)
+        try:
+            history = db.get_gex_snapshot_history(sym, days=history_days)
+            result["history"] = history
+        except Exception as e:
+            logger.warning(f"  {sym} history 失败: {e}")
+            result["history"] = []
+
+        # 4. long_history (gex_history SqueezeMetrics 90 天)
+        try:
+            # SqueezeMetrics 表目前只有 SPX (历史回填项目), 非 SPX 直接空
+            if sym != "SPX":
+                result["long_history"] = []
+            else:
+                long_rows = db.get_gex_history_days(long_days)
+                # get_gex_history_days 返回 sqlite3.Row 列表, 转 dict
+                result["long_history"] = [dict(r) for r in long_rows]
+        except Exception as e:
+            logger.warning(f"  {sym} long_history 失败: {e}")
+            result["long_history"] = []
+
+        # 5. strikes (逐 strike 真实数据)
+        try:
+            strikes = db.get_gex_strikes(sym, snapshot_id=None, limit_strikes=strikes_limit)
+            result["strikes"] = {
+                "timestamp": str(result["latest"].get("timestamp", "")) if result["latest"] else "",
+                "spot_price": result["latest"].get("spot_price") if result["latest"] else None,
+                "strikes": strikes,
+                "strike_count": len(strikes),
+            }
+        except Exception as e:
+            logger.warning(f"  {sym} strikes 失败: {e}")
+            result["strikes"] = {"strikes": [], "strike_count": 0}
+
+        # 6. symbols (标的列表)
+        try:
+            syms = db.get_gex_snapshot_symbols()
+            result["symbols"] = syms
+        except Exception as e:
+            logger.warning(f"  symbols 失败: {e}")
+            result["symbols"] = []
+
+        return result
+    except Exception as e:
+        logger.error(f"dashboard-view 失败 ({symbol}): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ==================== Cross-Asset & Resonance History ====================
 @app.get("/api/dashboard/cross-asset-heatmap")
 async def cross_asset_heatmap():
