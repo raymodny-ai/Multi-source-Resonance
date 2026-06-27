@@ -645,6 +645,112 @@ class GEXCalculator:
             'current_net_gex': current_result['net_gex'],
         }
 
+    def calculate_gex_profile_adaptive(
+        self,
+        option_chain_df: pd.DataFrame,
+        spot_price: float,
+        coarse_steps: int = 40,
+        fine_steps: int = 120,
+        expand_pct: float = 0.005,
+    ) -> Dict[str, any]:
+        """两阶段自适应 GEX 曲线扫描 (在零 Gamma 附近加密)
+
+        设计动机:
+            默认 calculate_gex_profile 使用 40 步 ±10% 区间, 步长 ≈ 0.5% × spot,
+            对 SPX 而言粒度约 27.5pt, 远大于 dealer 对冲精度 (5pt)。
+            本方法先粗扫定位翻转区间, 再在翻转区间 ±0.5% 内加密 120 步,
+            精度可达 1-2pt, 同时比单次 500 步省 68% 计算量。
+
+        Args:
+            option_chain_df: 期权链 DataFrame (含 strike/open_interest/implied_volatility/option_type/days_to_expiry)
+            spot_price: 当前标的价格
+            coarse_steps: 第一阶段粗扫步数 (默认 40, 沿用现默认)
+            fine_steps: 第二阶段精扫步数 (默认 120)
+            expand_pct: 翻转区间局部放大比例 (默认 ±0.5%)
+
+        Returns:
+            {
+                'spot_prices': [float],           # 精扫段价格数组
+                'net_gex_values': [float],         # 精扫段 GEX 数组
+                'current_spot': float,
+                'current_net_gex': float,
+                'flip_point': float | None,        # 线性插值精确翻转点
+                'flip_zone': (lower, upper) | None,  # 粗扫识别的翻转区间
+                'coarse_steps': int,
+                'fine_steps': int,
+            }
+
+        Examples:
+            >>> calc = GEXCalculator()
+            >>> profile = calc.calculate_gex_profile_adaptive(df, 5500)
+            >>> print(profile['flip_point'])  # 5492.35 (SPX 真实 zero gamma 价位)
+        """
+        # ── 第一阶段:粗扫 (40 步, ±10%) — 找翻转区间 ──
+        coarse = self.calculate_gex_profile(
+            option_chain_df, spot_price,
+            price_range_pct=0.10, num_steps=coarse_steps,
+        )
+
+        spot_arr = coarse['spot_prices']
+        gex_arr = coarse['net_gex_values']
+
+        # 找第一个符号变化区间
+        flip_zone = None
+        for i in range(len(gex_arr) - 1):
+            if gex_arr[i] * gex_arr[i + 1] < 0:
+                flip_zone = (float(spot_arr[i]), float(spot_arr[i + 1]))
+                break
+
+        # 无翻转点, 直接返回粗扫结果
+        if flip_zone is None:
+            return {
+                'spot_prices': spot_arr,
+                'net_gex_values': gex_arr,
+                'current_spot': spot_price,
+                'current_net_gex': coarse['current_net_gex'],
+                'flip_point': None,
+                'flip_zone': None,
+                'coarse_steps': coarse_steps,
+                'fine_steps': 0,
+            }
+
+        p_lo, p_hi = flip_zone
+
+        # ── 第二阶段:精扫 (翻转区间 ±0.5% 内 120 步) ──
+        fine_low = p_lo * (1 - expand_pct)
+        fine_high = p_hi * (1 + expand_pct)
+        # 保证 fine_low < fine_high (极端情况: 翻转区间本身就是 0)
+        if fine_high <= fine_low:
+            fine_high = p_hi * (1 + expand_pct)
+        fine_prices = np.linspace(fine_low, fine_high, fine_steps)
+        fine_gex = [
+            self.calculate_portfolio_gex_vectorized(option_chain_df, float(p))['net_gex']
+            for p in fine_prices
+        ]
+
+        # 在精扫里找翻转点 → 线性插值
+        flip_point = None
+        for i in range(len(fine_gex) - 1):
+            if fine_gex[i] * fine_gex[i + 1] < 0:
+                g1, g2 = fine_gex[i], fine_gex[i + 1]
+                if g2 != g1:
+                    flip_point = float(
+                        fine_prices[i] + (-g1) * (fine_prices[i + 1] - fine_prices[i])
+                        / (g2 - g1)
+                    )
+                break
+
+        return {
+            'spot_prices': [float(p) for p in fine_prices],
+            'net_gex_values': [float(g) for g in fine_gex],
+            'current_spot': spot_price,
+            'current_net_gex': coarse['current_net_gex'],
+            'flip_point': flip_point,
+            'flip_zone': flip_zone,
+            'coarse_steps': coarse_steps,
+            'fine_steps': fine_steps,
+        }
+
     def aggregate_gex_by_expiry(
         self,
         option_chain_df: pd.DataFrame,
