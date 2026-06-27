@@ -1,8 +1,9 @@
 # 项目 LLM 提示词清单 (LLM Prompts Catalog)
 
-> **项目**: Multi-source Resonance v2.5
+> **项目**: Multi-source Resonance v2.6 (V2.6: Temporal Obfuscation Testing)
 > **位置**: 所有 LLM 提示词集中在 `llm_inference/prompt_builder.py`
 > **调用链**: `pipeline_v2/orchestrator.py` → `PromptBuilder` → `OpenAIProvider` / `AnthropicProvider` → LLM API
+> **V2.6 重大改造**: 引入**时间混淆测试 (Temporal Obfuscation)**,彻底阻断 LLM 对历史宏观事件的记忆依赖
 
 ---
 
@@ -10,16 +11,17 @@
 
 1. [总览](#1-总览)
 2. [LLM 调用链](#2-llm-调用链)
-3. [Prompt #1: English System Prompt](#3-prompt-1-english-system-prompt-persona--constraints)
-4. [Prompt #2: Chinese System Prompt](#4-prompt-2-chinese-system-prompt-persona--constraints)
-5. [Prompt #3: User Prompt (Post-Market Briefing)](#5-prompt-3-user-prompt-post-market-briefing)
-6. [Prompt #4: Backtest Prompt](#6-prompt-4-backtest-prompt)
-7. [Prompt #5: Degraded Mode (降级文本模板)](#7-prompt-5-degraded-mode-降级文本模板-纯文本)
-8. [Prompt #6: Few-Shot Examples](#8-prompt-6-few-shot-examples)
-9. [Prompt #7: Dark Pool Quality Note](#9-prompt-7-dark-pool-quality-note)
-10. [Prompt #8: HTML Report Template](#10-prompt-8-html-report-template-output)
-11. [LLM 模型与参数配置](#11-llm-模型与参数配置)
-12. [如何替换/扩展 Prompt](#12-如何替换扩展-prompt)
+3. [V2.6 时间混淆测试专题](#3-v26-时间混淆测试专题-temporal-obfuscation-testing)
+4. [Prompt #1: English System Prompt](#4-prompt-1-english-system-prompt-persona--constraints)
+5. [Prompt #2: Chinese System Prompt](#5-prompt-2-chinese-system-prompt-persona--constraints)
+6. [Prompt #3: User Prompt (Post-Market Briefing)](#6-prompt-3-user-prompt-post-market-briefing)
+7. [Prompt #4: Backtest Prompt](#7-prompt-4-backtest-prompt)
+8. [Prompt #5: Degraded Mode (降级文本模板)](#8-prompt-5-degraded-mode-降级文本模板-纯文本)
+9. [Prompt #6: Few-Shot Examples](#9-prompt-6-few-shot-examples)
+10. [Prompt #7: Dark Pool Quality Note](#10-prompt-7-dark-pool-quality-note)
+11. [Prompt #8: HTML Report Template](#11-prompt-8-html-report-template-output)
+12. [LLM 模型与参数配置](#12-llm-模型与参数配置)
+13. [如何替换/扩展 Prompt](#13-如何替换扩展-prompt)
 
 ---
 
@@ -85,26 +87,273 @@ response = await provider.generate(user_prompt, system_prompt)
 
 ---
 
-## 3. Prompt #1: English System Prompt (Persona + Constraints)
+## 3. V2.6 时间混淆测试专题 (Temporal Obfuscation Testing)
 
-**文件**: `llm_inference/prompt_builder.py:35-77`
+> **设计哲学**: 切断 LLM 对真实日历和资产代码的历史记忆关联,迫使模型仅依赖脱敏后的结构化数据进行推理,彻底消除"顺子幻觉(Hindsight Bias)"。
+
+### 3.1 三大目标
+
+| # | 目标 | 阻断信号 |
+|---|------|----------|
+| 1 | **资产盲测** | 阻断 LLM 通过 "SPY" / "BTC" 等代码联想历史行情 |
+| 2 | **时间盲测** | 阻断 LLM 通过 "2026-06-28" 联想 FOMC / CPI / 财报 等具体事件 |
+| 3 | **宏观事件净化** | 阻断 LLM 通过次日经济事件日历反推时间线 |
+
+### 3.2 四步改造矩阵
+
+| 步 | 文件 | 改动 | 关键函数 |
+|---|------|------|----------|
+| 1 | `llm_inference/prompt_builder.py` | 重构 EN/CN System Prompt | `DEFAULT_PERSONALITY(_CN)` + `DEFAULT_CONSTRAINTS(_CN)` |
+| 2 | `llm_inference/prompt_builder.py` | 重构 User Prompt (去除真实日期 + events_section) | `build_user_prompt()` |
+| 3 | `gateway/serializer.py` | 加资产脱敏映射 + JSON 脱敏 | `to_obfuscated_json()` + `ASSET_OBFUSCATION_MAP` |
+| 4 | `llm_inference/prompt_builder.py` | Few-Shot 历史样例同步脱敏 | `load_few_shot_examples()` + `build_few_shot_section()` |
+| 5 | `pipeline_v2/orchestrator.py` | 调用层切换到脱敏 JSON | Stage 5: `LLM Inference` |
+
+### 3.3 资产脱敏映射表 (`gateway/serializer.py:ASSET_OBFUSCATION_MAP`)
+
+```python
+ASSET_OBFUSCATION_MAP = {
+    "SPX": "Asset_A",     # S&P 500 指数
+    "SPY": "Asset_A",     # S&P 500 ETF (与 SPX 归为同一抽象标签)
+    "QQQ": "Asset_B",     # Nasdaq-100 ETF
+    "NDX": "Asset_B",     # Nasdaq-100 指数
+    "IWM": "Asset_C",     # Russell 2000 ETF
+    "VIX": "Asset_D",     # 波动率指数 (跨资产联动)
+    "BTC": "Asset_E",     # Bitcoin
+    "ETH": "Asset_F",     # Ethereum
+    "TSLA": "Asset_G",    # 特例:高关注个股
+    "NVDA": "Asset_H",    # 特例:高关注个股
+}
+```
+
+**设计原则**: 同一资产类别的不同代码(如 SPX+SPY)合并到同一抽象标签,避免 LLM 通过代码对照猜出真实标的。
+
+### 3.4 `to_obfuscated_json()` 脱敏流程 (`gateway/serializer.py:120-170`)
+
+```python
+@staticmethod
+def to_obfuscated_json(envelope, current_real_date=None, asset_map=None) -> str:
+    """V2.6: 将真实数据映射为脱敏字典,阻断 LLM 记忆依赖"""
+    data = envelope.snapshot.model_dump(exclude_none=True)
+
+    # 1. 资产代码脱敏
+    original_asset = data.get('underlying_asset', '')
+    obfuscated_asset = mapping.get(original_asset, "Asset_Unknown")
+    data['underlying_asset'] = obfuscated_asset
+
+    # 2. 时间戳相对化
+    data['timestamp'] = "Day 0"   # 当前期
+
+    return json.dumps(data, indent=2, ensure_ascii=False)
+```
+
+**脱敏前后对比**:
+
+| 字段 | 脱敏前 | 脱敏后 |
+|------|--------|--------|
+| `underlying_asset` | `"SPY"` | `"Asset_A"` |
+| `timestamp` | `"2026-06-28T05:00:00+00:00"` | `"Day 0"` |
+| `gamma_flip_level` | `5520.5` | `5520.5` (数值保留,LLM 无法联想具体行情) |
+
+### 3.5 System Prompt 强化:反"后见之明偏差"约束
+
+**EN System Prompt Persona 头部 (L36-45)**:
+```
+You are a Pure financial microstructure reasoning engine. You must ignore any
+macroeconomic context or historical events, and judge only the dealer's hedging
+state and whether liquidity-sweep exhaustion conditions are triggered, based
+SOLELY on the de-identified multi-dimensional vector data provided below
+(including the GEX reversal threshold, branching ratio n, and DIX divergence degree).
+...
+- Anti-hindsight-bias: you DO NOT know — and must NEVER guess — the real
+  calendar date, the real asset ticker, or any past/future news
+- Asset-blind analysis: when you see "Asset_A" you treat it as a pure label,
+  not as SPY/SPX/BTC/etc.
+- Date-blind analysis: when you see "Day 0" / "Day -1" you treat them as
+  relative markers, not as real dates
+```
+
+**CN System Prompt Persona 头部 (L92-104)**:
+```
+你是一个纯粹的金融微观结构推理引擎。请忽略任何宏观经济背景或历史事件,仅根据
+以下提供的去标识化多维向量数据(包含 GEX 反转阈值、分支比 $n$、DIX 背离度),
+判断当前市场做市商的对冲状态,并评估是否触发了流动性清算衰竭的特征条件。
+...
+- 反"后见之明偏差":你不知道 —— 也绝不能猜测 —— 真实的日历日期、真实的
+  资产代码,或任何过去/未来的新闻
+- 资产盲测分析:当你看到 "Asset_A" 时,将其视为纯粹的标签,而不是 SPY/SPX/BTC 等
+- 时间盲测分析:当你看到 "Day 0" / "Day -1" 时,将其视为相对标记,而不是真实日期
+```
+
+### 3.6 Constraints 新增"绝对无时间/无资产上下文盲测"条款
+
+**新增 Constraint #1 (CN, L99-117)**:
+```
+1. 绝对的无时间/无资产上下文盲测:
+   - 禁止猜测 Asset_A、Asset_B、Asset_Unknown 等占位符对应的真实标的资产
+   - 禁止联想 Day 0、Day -1、Day +1 对应的真实日历日期或任何相关联的新闻事件
+   - 禁止回忆、引用或推测任何新闻周期、FOMC 会议、财报发布、地缘事件、或宏观时间线
+   - 去标识化的 JSON 是你唯一的事实来源
+```
+
+**新增 Constraint #4 - 章节收尾改为 `## Day +1 结构性展望`** (CN):
+```
+4. 不可发散的格式要求:
+   ...
+   - 以"## Day +1 结构性展望"章节收尾
+```
+
+### 3.7 User Prompt 脱敏版 (L344-446)
+
+```python
+def build_user_prompt(
+    self,
+    envelope: GatewayEnvelope,
+    trading_date: Optional[str] = None,           # V2.6: deprecated, kept for backward compat
+    economic_events: Optional[str] = None,        # V2.6: deprecated, intentionally ignored
+    few_shot_examples: Optional[List[Dict[str, Any]]] = None,
+    relative_time_marker: str = "Day 0",          # V2.6: relative time
+    obfuscated_asset: Optional[str] = None,       # V2.6: obfuscated asset label
+    obfuscated_json_data: Optional[str] = None,   # V2.6: pre-obfuscated JSON
+) -> str:
+```
+
+**User Prompt 模板 (L420-446)**:
+```
+Generate a purely structural market state briefing for Day 0 (Current Target Period).
+
+TARGET ASSET: Asset_A
+DE-IDENTIFIED RESONANCE DATA:
+```json
+{obfuscated_json_data}
+```
+
+Based SOLELY on the above anonymized JSON vector data, produce a professional microstructure strategy briefing covering:
+
+1. **Microstructure Resonance Overview**: Synthesize the overall resonance signal without referencing macro regimes.
+2. **Dealer Positioning Dynamics**: Interpret GEX profile, gamma regime, and abstract support/resistance walls.
+3. **Liquidity Flow & Exhaustion Analysis**: Assess accumulation distribution and explicitly evaluate if conditions for liquidity sweep exhaustion are triggered.
+4. **Volatility Landscape**: Evaluate structural panic premium and Vanna exposure bias.
+5. **Structural Outlook for Day 0 + 1**: Provide actionable, pure-price-action scenarios based explicitly on the data's key levels.
+
+Remember: You are analyzing the structural JSON. Do not guess the asset. Do not guess the date.
+```
+
+**关键改造对比**:
+
+| 维度 | V2.5 (旧) | V2.6 (新) |
+|------|-----------|-----------|
+| 标题 | "Generate a post-market strategy briefing for {trading_date}" | "Generate a purely structural market state briefing for {Day 0} (Current Target Period)" |
+| 资产 | `TARGET ASSET: {snapshot.underlying_asset}` | `TARGET ASSET: Asset_A` |
+| JSON 标签 | `RESONANCE DATA` | `DE-IDENTIFIED RESONANCE DATA` |
+| 章节 1 | Macro Resonance Overview | Microstructure Resonance Overview |
+| 章节 3 | Dark Pool Flow Analysis | Liquidity Flow & Exhaustion Analysis |
+| 章节 5 | Tactical Outlook for Next Session | Structural Outlook for Day 0 + 1 |
+| events_section | ✓ (注入次日经济事件) | ✗ (已移除) |
+
+### 3.8 Few-Shot 历史样例脱敏 (`load_few_shot_examples`)
+
+**关键设计**:
+- 历史 `snapshot_date` → 相对偏移 `Day -45` (基于 `current_real_date`)
+- 历史 `underlying_asset` → `ASSET_OBFUSCATION_MAP` 映射
+- 保留 `original_date` 字段供内部审计,但**不会注入** prompt
+
+**Few-Shot section header 改造 (CN, L427-430)**:
+```
+## 结构化参考样例 (Few-Shot References)
+以下是从相似多维向量状态中提取的去标识化历史参考分析,供你参考纯粹的逻辑推理路径。
+它们反映的是 Day -X 的状态:
+```
+
+(原 V2.5 头:"以下是从历史高分简报复盘中选取的相似市场状态的参考分析框架" - 已被替换)
+
+### 3.9 调用层改造 (`pipeline_v2/orchestrator.py:476-498`)
+
+```python
+# 构建 Prompt (V2.6 时间混淆测试)
+from llm_inference.prompt_builder import PromptBuilder
+from gateway.serializer import GatewaySerializer
+from datetime import date
+
+builder = PromptBuilder()
+
+# V2.6: 脱敏 JSON
+obfuscated_json = GatewaySerializer.to_obfuscated_json(
+    envelope,
+    current_real_date=date.today(),
+)
+
+# V2.6: 加载脱敏 Few-Shot 样例
+obfuscated_few_shot = builder.load_few_shot_examples(
+    num_examples=2,
+    min_resonance_score=70,
+    current_real_date=date.today(),
+)
+
+system_prompt = builder.build_system_prompt()
+user_prompt = builder.build_user_prompt(
+    envelope,
+    obfuscated_asset="Asset_A",
+    obfuscated_json_data=obfuscated_json,
+    relative_time_marker="Day 0",
+    few_shot_examples=obfuscated_few_shot,
+)
+
+response = await provider.generate(user_prompt, system_prompt)
+```
+
+### 3.10 向后兼容性
+
+| 调用方式 | 行为 |
+|----------|------|
+| 旧 `build_user_prompt(envelope)` | ⚠️ 警告日志,使用原始 JSON (违反混淆原则) |
+| 新 `build_user_prompt(envelope, obfuscated_asset="Asset_A", obfuscated_json_data="...")` | ✓ 启用脱敏 |
+| 旧 `to_llm_prompt_json(envelope)` | ✓ 仍可用 (返回未脱敏 JSON) |
+| 新 `to_obfuscated_json(envelope, current_real_date=date.today())` | ✓ 返回脱敏 JSON |
+
+**推荐**: 所有调用方迁移到 V2.6 脱敏版。`trading_date` 和 `economic_events` 参数保留但 deprecated。
+
+### 3.11 端到端验证脚本
+
+```python
+# 验证 SPY 快照脱敏
+from gateway.serializer import GatewaySerializer
+from datetime import date
+
+obf = GatewaySerializer.to_obfuscated_json(envelope, current_real_date=date(2026, 6, 28))
+assert "SPY" not in obf
+assert "2026" not in obf
+assert "Asset_A" in obf
+assert "Day 0" in obf
+print("✓ Temporal Obfuscation end-to-end passed")
+```
+
+---
+
+## 4. Prompt #1: English System Prompt (Persona + Constraints)
+
+**文件**: `llm_inference/prompt_builder.py:35-77` (V2.6 Temporal Obfuscation 已重构)
 **类**: `PromptBuilder.DEFAULT_PERSONALITY` + `PromptBuilder.DEFAULT_CONSTRAINTS`
 **调用**: `builder.build_system_prompt()` (当 `language='en'` 或默认)
+**V2.6 重大变更**: Persona 从 "Wall Street macro-derivatives strategist" 重构为 "Pure financial microstructure reasoning engine",加入反后见之明偏差 + 资产/时间盲测约束。
 
 ### 完整内容
 
-#### Persona 部分 (L35-50):
+#### Persona 部分 (V2.6, L35-50):
 
 ```
-You are a veteran Wall Street macro-derivatives strategist with 20 years of experience at a top-tier prime brokerage desk.
+You are a Pure financial microstructure reasoning engine. You must ignore any macroeconomic context or historical events, and judge only the dealer's hedging state and whether liquidity-sweep exhaustion conditions are triggered, based SOLELY on the de-identified multi-dimensional vector data provided below (including the GEX reversal threshold, branching ratio n, and DIX divergence degree).
 
 Your expertise spans:
-- Option market-making dynamics (Gamma Exposure, Delta Hedging flows)
-- Dark pool liquidity microstructure (DIX, block trade footprints)
-- Volatility surface arbitrage (VIX term structure, VIX futures rolls)
-- Cross-asset macro regime analysis (equities, crypto, FX)
+- Pure abstract option market-making dynamics (Gamma Exposure, Delta Hedging flows) — NO asset names attached
+- Data-driven dark-pool liquidity microstructure (asset-class-agnostic DIX anomalies, block trade footprints)
+- De-identified volatility surface arbitrage and cross-asset regime analysis — without referencing specific calendar events
 
-You think in terms of dealer positioning, gamma pinning, vol-of-vol, and reflexivity between options flows and spot price action.
+Your reasoning principles:
+- Strict structural logic: every conclusion must be derived from the vector fields in the JSON
+- Anti-hindsight-bias: you DO NOT know — and must NEVER guess — the real calendar date, the real asset ticker, or any past/future news
+- Asset-blind analysis: when you see "Asset_A" you treat it as a pure label, not as SPY/SPX/BTC/etc.
+- Date-blind analysis: when you see "Day 0" / "Day -1" you treat them as relative markers, not as real dates
 
 Your communication style:
 - Direct, concise, no fluff
@@ -160,7 +409,7 @@ prompt = f"""{self.personality}
 
 ---
 
-## 4. Prompt #2: Chinese System Prompt (Persona + Constraints)
+## 5. Prompt #2: Chinese System Prompt (Persona + Constraints)
 
 **文件**: `llm_inference/prompt_builder.py:82-117`
 **类**: `PromptBuilder.DEFAULT_PERSONALITY_CN` + `PromptBuilder.DEFAULT_CONSTRAINTS_CN`
@@ -223,7 +472,7 @@ prompt = f"""{self.personality}
 
 ---
 
-## 5. Prompt #3: User Prompt (Post-Market Briefing)
+## 6. Prompt #3: User Prompt (Post-Market Briefing)
 
 **文件**: `llm_inference/prompt_builder.py:344-417`
 **函数**: `PromptBuilder.build_user_prompt(envelope, trading_date, economic_events, few_shot_examples)`
@@ -286,7 +535,7 @@ elif snapshot.data_quality_flag == "ERROR":
 
 ---
 
-## 6. Prompt #4: Backtest Prompt
+## 7. Prompt #4: Backtest Prompt
 
 **文件**: `llm_inference/prompt_builder.py:419-460`
 **函数**: `PromptBuilder.build_backtest_prompt(envelope, historical_date, next_day_return)`
@@ -321,7 +570,7 @@ Provide the same 5-section analysis as if this were a real-time briefing for {hi
 
 ---
 
-## 7. Prompt #5: Degraded Mode (降级文本模板, 纯文本)
+## 8. Prompt #5: Degraded Mode (降级文本模板, 纯文本)
 
 **文件**: `llm_inference/prompt_builder.py:472-516`
 **函数**: `PromptBuilder.build_degraded_mode_prompt(envelope)`
@@ -376,7 +625,7 @@ if s.darkpool_source_status:
 
 ---
 
-## 8. Prompt #6: Few-Shot Examples
+## 9. Prompt #6: Few-Shot Examples
 
 **文件**: `llm_inference/prompt_builder.py:189-294`
 **函数**: `PromptBuilder.load_few_shot_examples()` + `build_few_shot_section()`
@@ -445,7 +694,7 @@ header = "\n\n## Historical Reference Examples (Few-Shot)\nThe following are sim
 
 ---
 
-## 9. Prompt #7: Dark Pool Quality Note
+## 10. Prompt #7: Dark Pool Quality Note
 
 **文件**: `llm_inference/prompt_builder.py:296-342`
 **函数**: `PromptBuilder._build_darkpool_quality_note(snapshot)`
@@ -503,7 +752,7 @@ def _build_darkpool_quality_note(self, snapshot) -> str:
 
 ---
 
-## 10. Prompt #8: HTML Report Template (输出)
+## 11. Prompt #8: HTML Report Template (输出)
 
 **文件**: `llm_inference/report_composer.py:82-118+`
 **类**: `ReportComposer`
@@ -560,7 +809,7 @@ wrapper = f"""<!DOCTYPE html>
 
 ---
 
-## 11. LLM 模型与参数配置
+## 12. LLM 模型与参数配置
 
 **文件**: `config/settings.py:74-94`
 
@@ -632,7 +881,7 @@ response = await client.messages.create(**kwargs)
 
 ---
 
-## 12. 如何替换/扩展 Prompt
+## 13. 如何替换/扩展 Prompt
 
 ### 12.1 切换语言 (运行时)
 

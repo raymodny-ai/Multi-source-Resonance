@@ -477,11 +477,34 @@ class PipelineOrchestrator:
                 ctx.set_result('infer', {'degraded': True, 'reason': 'LLM not configured'})
                 return ctx
 
-            # 构建 Prompt
+            # 构建 Prompt (V2.6 时间混淆测试)
             from llm_inference.prompt_builder import PromptBuilder
+            from gateway.serializer import GatewaySerializer
+            from datetime import date
+
             builder = PromptBuilder()
+
+            # V2.6: 脱敏 JSON (阻断 LLM 对历史宏观事件的记忆联想)
+            obfuscated_json = GatewaySerializer.to_obfuscated_json(
+                envelope,
+                current_real_date=date.today(),
+            )
+
+            # V2.6: 加载脱敏 Few-Shot 样例
+            obfuscated_few_shot = builder.load_few_shot_examples(
+                num_examples=2,
+                min_resonance_score=70,
+                current_real_date=date.today(),
+            )
+
             system_prompt = builder.build_system_prompt()
-            user_prompt = builder.build_user_prompt(envelope)
+            user_prompt = builder.build_user_prompt(
+                envelope,
+                obfuscated_asset="Asset_A",                  # 脱敏资产
+                obfuscated_json_data=obfuscated_json,        # 脱敏 JSON
+                relative_time_marker="Day 0",                 # 相对时间
+                few_shot_examples=obfuscated_few_shot,       # 脱敏 Few-Shot
+            )
 
             # 调用 LLM
             response = await provider.generate(user_prompt, system_prompt)

@@ -2,15 +2,32 @@
 Multi-source Resonance V2.0 - Layer 2 序列化器
 
 将 Layer 1 的降维向量 (Dict) 转换为 Pydantic 验证后的 JSON 字符串。
+V2.6 新增: to_obfuscated_json() - 时间混淆脱敏 (Temporal Obfuscation)
 """
 
 import json
-from typing import Dict, Any
+from datetime import date, datetime
+from typing import Dict, Any, Optional
 from pydantic import ValidationError
 
 from gateway.schemas import ResonanceSnapshot, GatewayEnvelope
 from quant_logic.dimension_reducer import ResonanceVector
 from utils.logger import getLogger
+
+# ── V2.6: 资产脱敏映射表 (Temporal Obfuscation) ──
+# 将真实资产代码映射为去标识化标签,阻断 LLM 对历史宏观事件的记忆联想
+ASSET_OBFUSCATION_MAP: Dict[str, str] = {
+    "SPX": "Asset_A",     # S&P 500 指数
+    "SPY": "Asset_A",     # S&P 500 ETF (与 SPX 归为同一抽象标签)
+    "QQQ": "Asset_B",     # Nasdaq-100 ETF
+    "NDX": "Asset_B",     # Nasdaq-100 指数
+    "IWM": "Asset_C",     # Russell 2000 ETF
+    "VIX": "Asset_D",     # 波动率指数 (跨资产联动)
+    "BTC": "Asset_E",     # Bitcoin
+    "ETH": "Asset_F",     # Ethereum
+    "TSLA": "Asset_G",    # 特例:高关注个股
+    "NVDA": "Asset_H",    # 特例:高关注个股
+}
 
 logger = getLogger('gateway.serializer')
 
@@ -102,7 +119,10 @@ class GatewaySerializer:
 
     @staticmethod
     def to_llm_prompt_json(envelope: GatewayEnvelope) -> str:
-        """将信封序列化为供 LLM Prompt 注入的 JSON 字符串
+        """将信封序列化为供 LLM Prompt 注入的 JSON 字符串 (未脱敏)
+
+        ⚠️ V2.6: 此方法生成的是带真实资产代码和时间戳的 JSON。
+        推荐使用 to_obfuscated_json() 代替,以启用时间混淆测试。
 
         Args:
             envelope: 已验证的网关信封
@@ -114,6 +134,56 @@ class GatewaySerializer:
             indent=2,
             exclude_none=True,
         )
+
+    @staticmethod
+    def to_obfuscated_json(
+        envelope: GatewayEnvelope,
+        current_real_date: Optional[date] = None,
+        asset_map: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """V2.6: 将真实数据映射为脱敏字典,阻断 LLM 记忆依赖 (Temporal Obfuscation)
+
+        改造点:
+          1. underlying_asset → ASSET_OBFUSCATION_MAP 映射 (默认 Asset_A 等)
+          2. timestamp → "Day 0" (相对当前日期的偏移)
+          3. 其他可能泄露宏观时间线的字段保留 (因为都是数值化结构数据)
+
+        Args:
+            envelope: 已验证的网关信封
+            current_real_date: 当前真实日期 (用于相对时间计算,默认今天)
+            asset_map: 自定义资产映射表 (覆盖默认)
+
+        Returns:
+            脱敏后的 JSON 字符串 (indent=2, exclude_none)
+        """
+        if current_real_date is None:
+            current_real_date = date.today()
+
+        mapping = asset_map or ASSET_OBFUSCATION_MAP
+
+        # 1. 用 Pydantic dump 出字典 (而不是直接 dump_json)
+        data = envelope.snapshot.model_dump(exclude_none=True)
+
+        # 2. 资产代码脱敏
+        original_asset = data.get('underlying_asset', '')
+        obfuscated_asset = mapping.get(original_asset, "Asset_Unknown")
+        data['underlying_asset'] = obfuscated_asset
+
+        # 3. 时间戳相对化 (Day 0 = current_real_date)
+        #    原 timestamp 形如 "2026-06-28T05:00:00Z"
+        #    替换为 "Day 0" (当前期) — 因为 envelope 本来就代表"今天"
+        data['timestamp'] = "Day 0"
+
+        # 4. 字段级脱敏: darkpool_source_status 里的 asset 名也可能泄露
+        #    但它目前不含资产名,仅含源标识符 (squeezemetrics/axlfi),无需处理
+
+        # 5. 记录脱敏日志 (便于审计)
+        logger.info(
+            f"V2.6 obfuscated JSON: {original_asset} → {obfuscated_asset}, "
+            f"timestamp → 'Day 0', size={len(json.dumps(data))} bytes"
+        )
+
+        return json.dumps(data, indent=2, ensure_ascii=False)
 
     @staticmethod
     def to_file(envelope: GatewayEnvelope, file_path: str) -> None:
