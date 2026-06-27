@@ -24,12 +24,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from config.settings import Config
 from utils.logger import getLogger
-# 数据质量验证 (v2.3) - 可选依赖, 导入失败不阻塞 fetcher
-try:
-    from quant_logic.gex_data_quality import validate_after_fetch
-    _QUALITY_VALIDATOR_AVAILABLE = True
-except ImportError:
-    _QUALITY_VALIDATOR_AVAILABLE = False
 
 logger = getLogger('gexmetrix_fetcher')
 
@@ -151,21 +145,6 @@ class GEXMetrixFetcher:
         filepath = symbol_dir / filename
         return self.save_json(data, filepath)
 
-    def _enrich_with_quality(self, symbol: str, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """v2.3: 对单条快照跑数据质量验证, 失败时返回中性默认值
-
-        Returns:
-            dict (validate_snapshot 输出) 或默认 {'score': 0.5, 'valid': True, ...}
-        """
-        if not _QUALITY_VALIDATOR_AVAILABLE:
-            return {
-                'symbol': symbol, 'valid': True, 'score': 0.5,
-                'lag_seconds': None, 'oi_coverage_pct': None,
-                'iv_violations': 0, 'strike_density': 0,
-                'zero_oi_pct': 0.0, 'issues': ['validator_unavailable'],
-            }
-        return validate_after_fetch(symbol, raw_data)
-
     def update_summary(self, success_list: List[dict]) -> Path:
         """更新全局 summary.json"""
         summary = {
@@ -230,13 +209,21 @@ class GEXMetrixFetcher:
     def parse_snapshot_key_metrics(data: dict) -> Dict[str, Any]:
         """从原始快照 JSON 中提取关键指标摘要
 
-        解析 GEXMetrix API 返回的完整快照数据。
-        GEXMetrix 原始数据含 options 数组（每笔有 gamma/delta/open_interest），
-        需要汇总计算 GEX 值，不能直接读顶层字段。
+        解析 GEXMetrix API 返回的完整快照数据，提取以下字段：
+        - net_gex: 净 Gamma Exposure (Call GEX - Put GEX)
+        - call_gex: Call 端 Gamma 总值
+        - put_gex: Put 端 Gamma 总值
+        - zero_gamma_level: 零 Gamma 价位 (做市商对冲方向分界线)
+        - call_wall: Call Wall 行权价 (最大 Call GEX 所在价位)
+        - put_wall: Put Wall 行权价 (最大 Put GEX 所在价位)
+        - spot_price: 现货价格
+        - total_gamma: 总 Gamma (|call_gex| + |put_gex|)
 
-        GEX = gamma × open_interest × 100 (每张合约 100 股)
-        Call GEX > 0 → 做市商买入对冲（正 Gamma，压制波动）
-        Put GEX < 0 → 做市商卖出对冲（负 Gamma，放大波动）
+        Args:
+            data: GEXMetrix API 返回的完整快照 dict
+
+        Returns:
+            包含 key metrics 的字典，缺失字段为 None
         """
         result = {
             "net_gex": None,
@@ -251,100 +238,107 @@ class GEXMetrixFetcher:
 
         try:
             inner = data.get("data", data)
-            # GEXMetrix 实际结构: data.data.options = [{option, gamma, open_interest, ...}]
-            payload = inner.get("data", inner) if isinstance(inner, dict) else inner
 
-            # 现价
+            # 尝试多种常见字段名
             result["spot_price"] = (
-                payload.get("current_price")
-                or payload.get("spot_price")
-                or payload.get("price")
+                inner.get("spot_price")
+                or inner.get("spotPrice")
+                or inner.get("price")
+                or inner.get("underlying_price")
             )
 
-            # 从 options 数组计算 GEX
-            options = payload.get("options", [])  # GEXMetrix 格式
-            if not options:
-                # 也查查内层有没有 options
-                options = inner.get("options", [])
-                if not options:
-                    options = data.get("options", [])
+            result["net_gex"] = (
+                inner.get("net_gex")
+                or inner.get("netGEX")
+                or inner.get("netGamma")
+                or inner.get("total_net_gex")
+            )
 
-            if options and isinstance(options, list):
-                call_gamma_sum = 0.0
-                put_gamma_sum = 0.0
-                max_call_gamma = 0.0
-                max_put_gamma = 0.0
-                max_call_strike = None
-                max_put_strike = None
+            result["call_gex"] = (
+                inner.get("call_gex")
+                or inner.get("callGEX")
+                or inner.get("total_call_gex")
+            )
 
-                # gamma = 该期权的 gamma 值，open_interest = 未平仓量
-                # GEX = gamma × OI × 合约乘数 (通常 100)
-                CONTRACT_MULTIPLIER = 100
+            result["put_gex"] = (
+                inner.get("put_gex")
+                or inner.get("putGEX")
+                or inner.get("total_put_gex")
+            )
 
-                for opt in options:
-                    if not isinstance(opt, dict):
-                        continue
-                    gamma = opt.get("gamma") or 0
-                    oi = opt.get("open_interest") or 0
-                    strike = opt.get("option", "")  # 如 "SPX260717C00200000"
+            result["zero_gamma_level"] = (
+                inner.get("zero_gamma_level")
+                or inner.get("zeroGammaLevel")
+                or inner.get("zero_gamma")
+                or inner.get("gamma_neutral")
+                or inner.get("flip_point")
+            )
 
-                    if not gamma or not oi:
-                        continue
+            # Call Wall / Put Wall - 从 strikes 数组或顶层字段提取
+            result["call_wall"] = (
+                inner.get("call_wall")
+                or inner.get("callWall")
+                or inner.get("resistance_level")
+            )
+            result["put_wall"] = (
+                inner.get("put_wall")
+                or inner.get("putWall")
+                or inner.get("support_level")
+            )
 
-                    gex = float(gamma) * float(oi) * CONTRACT_MULTIPLIER
+            # 如果顶层没有，尝试从 strikes 数组推断
+            if (result["call_wall"] is None or result["put_wall"] is None):
+                strikes = inner.get("strikes", []) or inner.get("levels", [])
+                if strikes:
+                    # 查找最大 call/put gamma 对应的行权价
+                    max_call_strike = None
+                    max_call_val = 0
+                    max_put_strike = None
+                    max_put_val = 0
+                    for s in strikes:
+                        if isinstance(s, dict):
+                            cg = s.get("call_gex") or s.get("callGEX") or s.get("gamma") or 0
+                            pg = s.get("put_gex") or s.get("putGEX") or 0
+                            strike = s.get("strike") or s.get("strike_price") or 0
+                            if cg is None and pg is None:
+                                continue
+                            if cg and abs(float(cg)) > max_call_val:
+                                max_call_val = abs(float(cg))
+                                max_call_strike = float(strike)
+                            if pg and abs(float(pg)) > max_put_val:
+                                max_put_val = abs(float(pg))
+                                max_put_strike = float(strike)
+                    if result["call_wall"] is None:
+                        result["call_wall"] = max_call_strike
+                    if result["put_wall"] is None:
+                        result["put_wall"] = max_put_strike
 
-                    # 判断 call/put: option 字符串如 SPX260717C00200000
-                    # C = Call, P = Put
-                    if isinstance(strike, str):
-                        is_call = "C" in strike.split("C")[0] if len(strike) > 10 else False
-                        # 简单判断: 期权符号倒数第3位之后有 C 或 P
-                        # 格式: [根] + [日期] + [C/P] + [行权价填充]
-                        try:
-                            opt_type = strike[9] if len(strike) > 9 else ""
-                            is_call = opt_type == "C"
-                        except (IndexError, TypeError):
-                            is_call = True  # fallback
-                    else:
-                        is_call = True
+            # 如果 call_gex/put_gex 为空但 net_gex 有值，尝试从 strikes 汇总
+            if result["call_gex"] is None or result["put_gex"] is None:
+                strikes = inner.get("strikes", []) or inner.get("levels", [])
+                if strikes:
+                    call_sum = 0.0
+                    put_sum = 0.0
+                    for s in strikes:
+                        if isinstance(s, dict):
+                            cg = s.get("call_gex") or s.get("callGEX") or s.get("gamma") or 0
+                            pg = s.get("put_gex") or s.get("putGEX") or 0
+                            if cg:
+                                call_sum += float(cg)
+                            if pg:
+                                put_sum += float(pg)
+                    if result["call_gex"] is None and call_sum != 0:
+                        result["call_gex"] = call_sum
+                    if result["put_gex"] is None and put_sum != 0:
+                        result["put_gex"] = put_sum
 
-                    if is_call:
-                        call_gamma_sum += gex
-                        if gex > max_call_gamma:
-                            max_call_gamma = gex
-                            # 提取行权价：C 后面的数字
-                            if isinstance(strike, str) and len(strike) > 10:
-                                try:
-                                    max_call_strike = float(strike[10:]) / 1000
-                                except ValueError:
-                                    pass
-                    else:
-                        put_gamma_sum += gex
-                        if abs(gex) > max_put_gamma:
-                            max_put_gamma = abs(gex)
-                            if isinstance(strike, str) and len(strike) > 10:
-                                try:
-                                    max_put_strike = float(strike[10:]) / 1000
-                                except ValueError:
-                                    pass
+            # 计算 total_gamma
+            if result["call_gex"] is not None and result["put_gex"] is not None:
+                result["total_gamma"] = abs(result["call_gex"]) + abs(result["put_gex"])
 
-                result["call_gex"] = call_gamma_sum
-                result["put_gex"] = -abs(put_gamma_sum)
-                result["net_gex"] = call_gamma_sum + result["put_gex"]
-                result["total_gamma"] = call_gamma_sum + abs(put_gamma_sum)
-                result["call_wall"] = max_call_strike
-                result["put_wall"] = max_put_strike
-
-            # 零 Gamma 水平：计算 put_gex ≈ call_gex 的价位
-            # ponytail: 更精确的 zero_gamma 需要插值 OTM strike 之间的 gamma 曲线
-            if result["spot_price"] and result["net_gex"] is not None:
-                if result["net_gex"] > 0:
-                    # 正 Gamma → zero gamma 在现价上方
-                    result["zero_gamma_level"] = result["spot_price"] * 1.05
-                elif result["net_gex"] < 0:
-                    # 负 Gamma → zero gamma 在现价下方
-                    result["zero_gamma_level"] = result["spot_price"] * 0.95
-                else:
-                    result["zero_gamma_level"] = result["spot_price"]
+            # 如果 net_gex 为空但 call_gex 和 put_gex 都有值
+            if result["net_gex"] is None and result["call_gex"] is not None and result["put_gex"] is not None:
+                result["net_gex"] = result["call_gex"] - abs(result["put_gex"])
 
         except Exception as e:
             logger.error(f"解析关键指标失败: {e}", exc_info=True)
@@ -405,15 +399,12 @@ class GEXMetrixFetcher:
                 if data and "data" in data:
                     fp = self.save_snapshot(symbol, data)
                     size = os.path.getsize(fp)
-                    entry = {
+                    success_list.append({
                         "symbol": symbol,
                         "filename": fp.name,
                         "timestamp": data.get("timestamp", ""),
                         "file_size": size,
-                    }
-                    # v2.3: 数据质量验证 (优雅失败)
-                    entry["quality"] = self._enrich_with_quality(symbol, data)
-                    success_list.append(entry)
+                    })
                     self.clean_old(symbol)
                 else:
                     logger.warning("  %s: no data", symbol)
@@ -434,15 +425,12 @@ class GEXMetrixFetcher:
                 if data and "data" in data:
                     fp = self.save_snapshot(symbol, data)
                     size = os.path.getsize(fp)
-                    entry = {
+                    success_list.append({
                         "symbol": symbol,
                         "filename": fp.name,
                         "timestamp": data.get("timestamp", ""),
                         "file_size": size,
-                    }
-                    # v2.3: 数据质量验证
-                    entry["quality"] = self._enrich_with_quality(symbol, data)
-                    success_list.append(entry)
+                    })
                     self.clean_old(symbol)
                 else:
                     logger.warning("  %s: no data", symbol)
