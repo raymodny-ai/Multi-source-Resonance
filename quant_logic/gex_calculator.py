@@ -527,7 +527,8 @@ class GEXCalculator:
     def calculate_portfolio_gex_vectorized(
         self,
         option_chain_df: pd.DataFrame,
-        spot_price: float
+        spot_price: float,
+        symbol: Optional[str] = None,
     ) -> Dict[str, any]:
         """向量化版组合 GEX 计算 (V2.0)
 
@@ -539,9 +540,12 @@ class GEXCalculator:
                              bid, ask, volume, open_interest, implied_volatility,
                              days_to_expiry
             spot_price: 标的资产当前价格
+            symbol: 标的代码 (e.g. 'SPX'). 若提供, 应用 alpha 校准
+                    使 net_gex 与 GEXMetrix 官方值对齐 (v2.4 校准)
+                    None = 跳过校准, 返回原始本地估值 (向后兼容)
 
         Returns:
-            同 calculate_portfolio_gex 的返回格式
+            同 calculate_portfolio_gex 的返回格式 + 'net_gex_calibrated': bool
         """
         if option_chain_df.empty:
             return self._empty_gex_result()
@@ -583,6 +587,21 @@ class GEXCalculator:
         put_gex = float(np.sum(gex_contrib[is_put]))
         net_gex = call_gex - put_gex
 
+        # v2.4: alpha 校准 (与 GEXMetrix 官方对齐)
+        net_gex_calibrated = False
+        if symbol is not None:
+            try:
+                from quant_logic.alpha_calibrator import get_effective_alpha
+                alpha = get_effective_alpha(symbol)
+                if alpha is not None and 0.5 <= alpha <= 1.5:  # sanity range
+                    net_gex *= alpha
+                    net_gex_calibrated = True
+            except ImportError:
+                # alpha_calibrator 不可用 (开发/测试场景), 跳过
+                pass
+            except Exception as e:
+                logger.debug(f"alpha calibration skipped for {symbol}: {e}")
+
         # 按行权价分组
         gex_by_strike = {}
         for i, strike in enumerate(strikes):
@@ -600,6 +619,7 @@ class GEXCalculator:
             'put_gex': float(put_gex),
             'gex_by_strike': gex_by_strike,
             'net_gex': float(net_gex),
+            'net_gex_calibrated': net_gex_calibrated,
         }
 
     def calculate_gex_profile(
@@ -608,6 +628,7 @@ class GEXCalculator:
         spot_price: float,
         price_range_pct: float = 0.10,
         num_steps: int = 40,
+        symbol: Optional[str] = None,
     ) -> Dict[str, any]:
         """生成完整 GEX 曲线 (Net GEX vs Price) (V2.0)
 
@@ -618,6 +639,7 @@ class GEXCalculator:
             spot_price: 当前标的价格
             price_range_pct: 价格扫描范围 (±10%)
             num_steps: 扫描步数
+            symbol: 标的代码 (可选, v2.4 alpha 校准)
 
         Returns:
             {
@@ -633,10 +655,10 @@ class GEXCalculator:
 
         net_gex_values = []
         for p in scan_prices:
-            result = self.calculate_portfolio_gex_vectorized(option_chain_df, p)
+            result = self.calculate_portfolio_gex_vectorized(option_chain_df, p, symbol)
             net_gex_values.append(result['net_gex'])
 
-        current_result = self.calculate_portfolio_gex_vectorized(option_chain_df, spot_price)
+        current_result = self.calculate_portfolio_gex_vectorized(option_chain_df, spot_price, symbol)
 
         return {
             'spot_prices': scan_prices.tolist(),
@@ -652,6 +674,7 @@ class GEXCalculator:
         coarse_steps: int = 40,
         fine_steps: int = 120,
         expand_pct: float = 0.005,
+        symbol: Optional[str] = None,
     ) -> Dict[str, any]:
         """两阶段自适应 GEX 曲线扫描 (在零 Gamma 附近加密)
 
@@ -687,7 +710,7 @@ class GEXCalculator:
         """
         # ── 第一阶段:粗扫 (40 步, ±10%) — 找翻转区间 ──
         coarse = self.calculate_gex_profile(
-            option_chain_df, spot_price,
+            option_chain_df, spot_price, symbol=symbol,
             price_range_pct=0.10, num_steps=coarse_steps,
         )
 
@@ -724,7 +747,7 @@ class GEXCalculator:
             fine_high = p_hi * (1 + expand_pct)
         fine_prices = np.linspace(fine_low, fine_high, fine_steps)
         fine_gex = [
-            self.calculate_portfolio_gex_vectorized(option_chain_df, float(p))['net_gex']
+            self.calculate_portfolio_gex_vectorized(option_chain_df, float(p), symbol)['net_gex']
             for p in fine_prices
         ]
 
@@ -755,6 +778,7 @@ class GEXCalculator:
         self,
         option_chain_df: pd.DataFrame,
         spot_price: float,
+        symbol: Optional[str] = None,
     ) -> Dict[str, any]:
         """按到期日分组计算 GEX 时间分布 (V2.0)
 
@@ -780,7 +804,7 @@ class GEXCalculator:
 
         for expiry in unique_expiries:
             subset = df[df['expiry'] == expiry]
-            result = self.calculate_portfolio_gex_vectorized(subset, spot_price)
+            result = self.calculate_portfolio_gex_vectorized(subset, spot_price, symbol)
             gex_by_expiry[str(expiry)] = result['net_gex']
 
         # 按到期远近分类
@@ -874,6 +898,7 @@ class GEXCalculator:
         return {
             'total_gex': 0.0, 'call_gex': 0.0, 'put_gex': 0.0,
             'gex_by_strike': {}, 'net_gex': 0.0,
+            'net_gex_calibrated': False,
         }
 
 

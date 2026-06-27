@@ -239,7 +239,7 @@ class PipelineOrchestrator:
             gex_calc = GEXCalculator()
             if option_data is not None:
                 gex_result = gex_calc.calculate_portfolio_gex_vectorized(
-                    option_data, spot_price
+                    option_data, spot_price, symbol='SPX'  # 标的是 SPX
                 )
             else:
                 gex_result = gex_calc._empty_gex_result()
