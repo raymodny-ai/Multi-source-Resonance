@@ -120,6 +120,9 @@ class DatabaseManager:
             
             # v2.1 迁移: 为现有数据库添加暗盘预处理列
             self._migrate_v21_darkpool()
+
+            # v2.3 迁移: 为 gex_snapshots 添加数据质量验证列
+            self._migrate_gex_quality()
             
             logger.info(f"数据库初始化成功 (WAL模式): {self.db_path}")
             
@@ -161,7 +164,7 @@ class DatabaseManager:
     
     def _migrate_v21_darkpool(self):
         """v2.1 迁移: 为现有数据库添加暗盘预处理列
-        
+
         使用 ALTER TABLE ADD COLUMN 添加新列,
         如果列已存在则忽略错误 (SQLite 不支持 IF NOT EXISTS for ADD COLUMN)
         """
@@ -178,6 +181,29 @@ class DatabaseManager:
                     f"ALTER TABLE dark_pool_metrics ADD COLUMN {col_name} {col_type}"
                 )
                 logger.info(f"v2.1 迁移: 添加列 dark_pool_metrics.{col_name}")
+            except sqlite3.OperationalError:
+                pass  # 列已存在, 跳过
+        self.connection.commit()
+
+    def _migrate_gex_quality(self):
+        """v2.3 迁移: 为 gex_snapshots 添加数据质量验证列 (GEXDataQualityValidator 输出)
+
+        新增列:
+            quality_score:      综合质量分 (0-1, < 0.5 视为 invalid)
+            data_lag_seconds:   snapshot timestamp 与当前时间的延迟 (秒)
+            oi_coverage_pct:    OI 覆盖率 (与 yfinance 期权链作免费基准, 仅 SPY/QQQ/IWM 等)
+        """
+        new_columns = [
+            ('quality_score', 'REAL DEFAULT 1.0'),
+            ('data_lag_seconds', 'INTEGER'),
+            ('oi_coverage_pct', 'REAL'),
+        ]
+        for col_name, col_type in new_columns:
+            try:
+                self.connection.execute(
+                    f"ALTER TABLE gex_snapshots ADD COLUMN {col_name} {col_type}"
+                )
+                logger.info(f"v2.3 迁移: 添加列 gex_snapshots.{col_name}")
             except sqlite3.OperationalError:
                 pass  # 列已存在, 跳过
         self.connection.commit()
