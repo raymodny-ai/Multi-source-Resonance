@@ -1142,11 +1142,16 @@ def _gex_row(r):
     if isinstance(r, tuple):
         keys = ["timestamp", "gex_local", "gex_calibrated", "spot_price", "put_wall_level", "flip_zone_lower", "flip_zone_upper"]
         d = {keys[i]: r[i] for i in range(min(len(keys), len(r)))}
-    return {"timestamp": str(d.get("timestamp", "")), "gex_local": d.get("gex_local", 0) or 0,
-            "gex_calibrated": d.get("gex_calibrated", 0) or 0,
-            "put_wall_level": d.get("put_wall_level", 0) or 0,
-            "flip_zone_lower": d.get("flip_zone_lower", 0) or 0,
-            "flip_zone_upper": d.get("flip_zone_upper", 0) or 0}
+    return {
+        "timestamp": str(d.get("timestamp", "")),
+        "gex_local": d.get("gex_local", 0) or 0,
+        "gex_calibrated": d.get("gex_calibrated", 0) or 0,
+        # 方案A (2026-06-28): 保留 None → 前端 echarts 跳过该 series,
+        # 避免 0 误画成贴底虚线。SqueezeMetrics CSV 无逐 strike 分布, 历史回填必为 None。
+        "put_wall_level": d.get("put_wall_level"),
+        "flip_zone_lower": d.get("flip_zone_lower"),
+        "flip_zone_upper": d.get("flip_zone_upper"),
+    }
 
 
 def _vix_row(r):

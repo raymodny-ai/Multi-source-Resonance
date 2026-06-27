@@ -251,6 +251,20 @@ class MainScheduler:
             misfire_grace_time=3600
         )
 
+        # 任务7: GEX 历史回填 (美东 21:00, 周一)
+        # 方案A (2026-06-28): 从 SqueezeMetrics CSV 拉最近 90 日历天 → gex_history
+        # 防止新数据(今日 DIX/GEX)没接上, 每周一盘后跑一次
+        self.scheduler.add_job(
+            self.task_backfill_gex_history,
+            trigger='cron',
+            day_of_week='mon',
+            hour='21',
+            minute='0',
+            id='backfill_gex_history',
+            name='GEX历史回填(SqueezeMetrics, 90天)',
+            misfire_grace_time=3600
+        )
+
         # 任务6: 备份数据库 (美东21:30)
         self.scheduler.add_job(
             self.task_backup_database,
@@ -969,6 +983,50 @@ class MainScheduler:
         except Exception as e:
             logger.error(f"α系数更新任务失败: {e}", exc_info=True)
             self.fallback_manager.record_failure('task_update_alpha')
+
+    async def task_backfill_gex_history(self):
+        """任务: GEX 历史回填 (SqueezeMetrics → gex_history)
+
+        方案A (2026-06-28): 每周一美东 21:00 跑一次
+        - 从 SqueezeMetrics DIX.csv 拉最近 90 日历天 (约 63 交易日)
+        - INSERT OR REPLACE 到 gex_history 表 (幂等, 按日期去重)
+        - put_wall_level / flip_zone_* 留 None (SqueezeMetrics 无逐 strike 数据)
+        - alpha_factor 从 system_config 读, fallback 1.0
+
+        启动: 不依赖 GEXMetrix, 免费公开 CSV
+        启动模式: 同步 (在 executor 中跑, 避免阻塞 asyncio loop)
+        """
+        try:
+            logger.info("开始执行 GEX 历史回填任务 (SqueezeMetrics)")
+            loop = asyncio.get_event_loop()
+
+            # 读 alpha_factor
+            alpha = await loop.run_in_executor(
+                self.db_executor,
+                lambda: self.db.get_config_value('alpha_factor', '1.0')
+            )
+            try:
+                alpha = float(alpha) if alpha else 1.0
+            except (TypeError, ValueError):
+                alpha = 1.0
+
+            # 调用回填脚本的内部函数 (避免 弹 出 subprocess)
+            from scripts.backfill_gex_history import backfill as _backfill_fn
+            result = await loop.run_in_executor(
+                self.executor,
+                lambda: _backfill_fn(days=90, dry_run=False)
+            )
+
+            inserted = result.get('inserted_rows', 0) if isinstance(result, dict) else 0
+            self.fallback_manager.reset_failure_count('task_backfill_gex_history')
+            logger.info(
+                f"GEX 历史回填完成: 插入 {inserted} 条, alpha={alpha}, "
+                f"范围 {result.get('date_range', '?') if isinstance(result, dict) else '?'}"
+            )
+
+        except Exception as e:
+            logger.error(f"GEX 历史回填任务失败: {e}", exc_info=True)
+            self.fallback_manager.record_failure('task_backfill_gex_history')
 
     async def task_calibrate_gexmetrix_alpha(self):
         """任务: GEXMetrix 源 alpha 校准 (v2.4)
