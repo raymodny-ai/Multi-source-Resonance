@@ -24,6 +24,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from config.settings import Config
 from utils.logger import getLogger
+# 数据质量验证 (v2.3) - 可选依赖, 导入失败不阻塞 fetcher
+try:
+    from quant_logic.gex_data_quality import validate_after_fetch
+    _QUALITY_VALIDATOR_AVAILABLE = True
+except ImportError:
+    _QUALITY_VALIDATOR_AVAILABLE = False
 
 logger = getLogger('gexmetrix_fetcher')
 
@@ -141,6 +147,21 @@ class GEXMetrixFetcher:
                 filename = f"snapshot_{int(time.time())}.json"
         else:
             filename = f"snapshot_{int(time.time())}.json"
+
+    def _enrich_with_quality(self, symbol: str, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """v2.3: 对单条快照跑数据质量验证, 失败时返回中性默认值
+
+        Returns:
+            dict (validate_snapshot 输出) 或默认 {'score': 0.5, 'valid': True, ...}
+        """
+        if not _QUALITY_VALIDATOR_AVAILABLE:
+            return {
+                'symbol': symbol, 'valid': True, 'score': 0.5,
+                'lag_seconds': None, 'oi_coverage_pct': None,
+                'iv_violations': 0, 'strike_density': 0,
+                'zero_oi_pct': 0.0, 'issues': ['validator_unavailable'],
+            }
+        return validate_after_fetch(symbol, raw_data)
 
         filepath = symbol_dir / filename
         return self.save_json(data, filepath)
@@ -372,6 +393,9 @@ class GEXMetrixFetcher:
                         "timestamp": data.get("timestamp", ""),
                         "file_size": size,
                     })
+                    # v2.3: 数据质量验证 (后置, 不阻塞保存)
+                    quality = self._enrich_with_quality(symbol, data)
+                    success_list[-1]["quality"] = quality
                     self.clean_old(symbol)
                 else:
                     logger.warning("    FAIL no data")
@@ -405,6 +429,9 @@ class GEXMetrixFetcher:
                         "timestamp": data.get("timestamp", ""),
                         "file_size": size,
                     })
+                    # v2.3: 数据质量验证
+                    quality = self._enrich_with_quality(symbol, data)
+                    success_list[-1]["quality"] = quality
                     self.clean_old(symbol)
                 else:
                     logger.warning("  %s: no data", symbol)
@@ -431,6 +458,9 @@ class GEXMetrixFetcher:
                         "timestamp": data.get("timestamp", ""),
                         "file_size": size,
                     })
+                    # v2.3: 数据质量验证
+                    quality = self._enrich_with_quality(symbol, data)
+                    success_list[-1]["quality"] = quality
                     self.clean_old(symbol)
                 else:
                     logger.warning("  %s: no data", symbol)
