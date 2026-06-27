@@ -107,7 +107,7 @@ class SignalPipeline:
         await self._bus.subscribe(Topics.DARKPOOL_PREPROCESSED, self._on_darkpool_preprocessed)  # v2.1
 
         logger.info(
-            "SignalPipeline 已订阅 {} 个topic",
+            "SignalPipeline 已订阅 %d 个topic",
             len(self._bus.get_topic_stats()),
         )
 
@@ -254,9 +254,13 @@ class SignalPipeline:
 
     async def _on_vix_update(self, data: Dict[str, Any]) -> None:
         """RESTPollScheduler 推送 VIX 期限结构"""
-        self._vix_cache.update(data)
+        # 数据可能直接是 dict 或嵌套在 'data' 字段里
+        payload = data.get('data', data) if isinstance(data, dict) else data
+        if isinstance(payload, dict):
+            self._vix_cache.update(payload)
+        else:
+            self._vix_cache['spot'] = data
         self._vix_ready = True
-        logger.debug("VIX 维度数据就绪: ratio=%.2f", data.get('ratio', 0))
         await self._evaluate_vix_dimension()
         await self._check_all_dimensions_ready()
 
@@ -294,8 +298,8 @@ class SignalPipeline:
             )
 
             logger.info(
-                f"VIX维度写入: ratio={term_structure['ratio']:.2f}, "
-                f"state={term_structure['state']}, panic={panic_premium:.2f}"
+                f"VIX维度写入: ratio={term_structure['ratio']:.4f}, "
+                f"state={term_structure['state']}, panic={panic_premium}"
             )
 
         except Exception as e:

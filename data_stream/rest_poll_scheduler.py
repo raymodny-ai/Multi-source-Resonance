@@ -148,6 +148,7 @@ class RESTPollScheduler:
             from data_fetchers.axlfi_fetcher import AxlfiFetcher
             from data_fetchers.gexmetrix_fetcher import GEXMetrixFetcher
 
+            self._squeezemetrics = SqueezeMetricsFetcher()  # GEX/DIX (免费 CSV)
             self._yahoo = YahooFinanceFetcher()  # VIX + 做空数据 (yfinance)
             self._axlfi = AxlfiFetcher()
             self._dbmf = DBMFFetcher()
@@ -155,7 +156,7 @@ class RESTPollScheduler:
             self._hyperliquid = HyperliquidFetcher()  # 加密衍生品 (REST 降级)
             self._ccdata = CCDataFetcher()            # 加密衍生品 (二级降级)
             self._gexmetrix = GEXMetrixFetcher()      # GEXMetrix 期权市场结构
-            logger.debug("数据获取器延迟加载完成 (7 数据源)")
+            logger.debug("数据获取器延迟加载完成 (8 数据源)")
         except Exception as e:
             logger.error(f"数据获取器加载失败: {e}", exc_info=True)
 
@@ -497,7 +498,7 @@ class RESTPollScheduler:
         loop = asyncio.get_event_loop()
         current_price = await loop.run_in_executor(self._executor, self._dbmf.get_dbmf_intraday_price)
         historical_prices = await loop.run_in_executor(
-            self._executor, lambda: self._dbmf.get_dbmf_historical_prices(days=10)
+            self._executor, lambda: self._dbmf.get_dbmf_historical_prices(period='2w')
         )
         if current_price and historical_prices:
             recovery = await loop.run_in_executor(

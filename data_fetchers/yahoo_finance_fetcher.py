@@ -123,12 +123,20 @@ class YahooFinanceFetcher:
                 return None
 
             latest_date = futures_df['Trade Date'].max()
-            today_fs = futures_df[futures_df['Trade Date'] == latest_date].sort_values('Tenor_Days')
+            today_fs = futures_df[futures_df['Trade Date'] == latest_date]
+
+            # 去重：同一合约名可能有多个 Tenor（周度+月度），只保留 Tenor 最小的那条
+            if 'Futures' in today_fs.columns:
+                today_fs = today_fs.loc[today_fs.groupby('Futures')['Tenor_Days'].idxmin()]
+
+            # 按到期日升序排列
+            today_fs = today_fs.sort_values('Tenor_Days')
 
             if len(today_fs) < 2:
                 logger.error(f"vix_utils: 最新日期 ({latest_date.date()}) 期货合约不足2个")
                 return None
 
+            # VX1 = 最近月 (tenor 最小), VX2 = 次月 (tenor 次小)
             idx = 0 if contract == 'VX1' else 1
             row = today_fs.iloc[idx]
             price = float(row['Settle']) if not pd.isna(row['Settle']) else float(row['Close'])

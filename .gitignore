@@ -77,4 +77,9 @@ deploy/ssl/
 test_reports/
 *.png
 data/signal_state.json
+# GEXMetrix 运行时快照缓存 (每次 fetch_all 重新生成, 106MB, 不入仓)
+data/gexmetrix/
+# 根目录散落的运行日志
+api_server.log
+*.log
 .qoder/

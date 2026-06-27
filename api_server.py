@@ -1067,6 +1067,27 @@ def _build_dashboard_data():
     dix = dp.get("dix_value", 0) or 0
     sr = dp.get("chartexchange_short_ratio", 0) or 0
 
+    # 从 GEXMetrix snapshots 补 wall/flip/spot 数据
+    gex_wall = gex.get("put_wall_level", 0) or 0
+    gex_flip_low = gex.get("flip_zone_lower", 0) or 0
+    gex_flip_high = gex.get("flip_zone_upper", 0) or 0
+    if gex_wall == 0 or gex_flip_low == 0 or gex_flip_high == 0:
+        try:
+            snap = db.get_gex_snapshot_latest('SPX')
+            if snap:
+                if gex_wall == 0:
+                    gex_wall = snap.get('put_wall') or 0
+                # 优先从 snapshot.zero_gamma_level 读真值 (GEXMetrix 提供)
+                zg = snap.get('zero_gamma_level') or 0
+                if gex_flip_low == 0 and zg:
+                    gex_flip_low = zg
+                if gex_flip_high == 0 and zg:
+                    # ponytail: ±1% 启发式 (实盘典型 flip zone 宽度)
+                    # 后续 P2 alpha 校准后用 GEXCalculator.identify_flip_zone 真算
+                    gex_flip_high = zg * 1.01
+        except Exception:
+            pass
+
     gex_score = 0.5 if gx != 0 else 0
     vix_score = 0.5 if vx > 0 else 0
     crypto_score = 0.25 if oi > 0 else 0
@@ -1089,9 +1110,9 @@ def _build_dashboard_data():
         "dimensions": {
             "gex": {"score": gex_score, "state": "NEUTRAL", "details": "GEX敞口正常",
                     "gex_local": gex.get("gex_local", 0), "gex_calibrated": gx,
-                    "put_wall_level": gex.get("put_wall_level", 0),
-                    "flip_zone_lower": gex.get("flip_zone_lower", 0),
-                    "flip_zone_upper": gex.get("flip_zone_upper", 0)},
+                    "put_wall_level": gex_wall,
+                    "flip_zone_lower": gex_flip_low,
+                    "flip_zone_upper": gex_flip_high},
             "vix": {"score": vix_score, "state": "CONTANGO", "details": "期限结构正常",
                     "vix_spot": vx, "vx1": vix.get("vx1", 0), "vx2": vix.get("vx2", 0),
                     "term_structure_ratio": vix.get("term_structure_ratio", 1.0),
