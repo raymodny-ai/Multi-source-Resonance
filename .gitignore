@@ -69,7 +69,7 @@ __pycache__/
 *.pyc
 
 # 部署
-frontend/dist/
+# frontend/dist/ 已 git track (Owner 2026-06-29 决定), 跨机器 clone 即用
 frontend/node_modules/
 deploy/ssl/
 
