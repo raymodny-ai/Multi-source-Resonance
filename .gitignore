@@ -6,7 +6,7 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+# dist/  (Python package) — 不再加, 避免误伤 frontend/dist (Owner 2026-06-29 决定)
 downloads/
 eggs/
 .eggs/
