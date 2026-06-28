@@ -19,11 +19,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -52,6 +53,30 @@ _collect_lock = asyncio.Lock()
 
 app = FastAPI(title="多源共振监控系统", version="1.0.0")
 
+
+class NoCacheStaticMiddleware(BaseHTTPMiddleware):
+    """强制不缓存前端静态资源 (HTML/JS/CSS/assets/*) - Owner 2026-06-29 决定。
+
+    目的: 避免浏览器缓存导致 dist/ 文件名 hash 变了但 UI 仍显示旧版本。
+    API 端点 (/api/*, /ws, /docs, /openapi.json) 不动, 让客户端 / proxy 正常缓存。
+    """
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        # 仅对前端相关路径加 no-cache; API/WS/docs 不动
+        if (
+            path == "/"
+            or path.startswith("/assets/")
+            or path == "/favicon.svg"
+            or path == "/icons.svg"
+            or (not path.startswith("/api/") and not path.startswith("/ws") and not path.startswith("/docs") and not path.startswith("/openapi"))
+        ):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -59,6 +84,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(NoCacheStaticMiddleware)
 
 # ==================== WebSocket ====================
 active_connections: list[WebSocket] = []
