@@ -16,6 +16,7 @@ import {
   X,
   Clock,
   BarChart3,
+  Cpu,
 } from 'lucide-react'
 
 const NAV_ITEMS = [
@@ -25,6 +26,7 @@ const NAV_ITEMS = [
   { path: '/signals', label: '共振信号', icon: Activity },
   { path: '/alerts', label: '告警中心', icon: Bell },
   { path: '/llm', label: 'LLM 分析', icon: Brain },
+  { path: '/pipeline', label: 'P1-P6 引擎', icon: Cpu },
   { path: '/system', label: '系统状态', icon: Monitor },
   { path: '/config', label: '参数配置', icon: Settings },
 ]

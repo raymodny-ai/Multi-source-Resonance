@@ -9,6 +9,7 @@ import SystemStatus from './pages/SystemStatus'
 import LLMAnalysis from './pages/LLMAnalysis'
 import ConfigPanel from './pages/ConfigPanel'
 const GammaDashboard = lazy(() => import('./pages/GammaDashboard'))
+const PipelineEngines = lazy(() => import('./pages/PipelineEngines'))
 
 export default function App() {
   return (
@@ -25,6 +26,11 @@ export default function App() {
           <Route path="gex" element={
             <Suspense fallback={<div className="p-8 text-[var(--text-secondary)]">加载中...</div>}>
               <GammaDashboard />
+            </Suspense>
+          } />
+          <Route path="pipeline" element={
+            <Suspense fallback={<div className="p-8 text-[var(--text-secondary)]">加载中...</div>}>
+              <PipelineEngines />
             </Suspense>
           } />
         </Route>

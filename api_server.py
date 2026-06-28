@@ -464,6 +464,127 @@ async def gex_symbol_dashboard_view(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ==================== V2.5 P1-P6 Internal Pipeline Observability ====================
+@app.get("/api/internal/pipeline/stats")
+async def pipeline_stats(layer: Optional[str] = None, symbol: Optional[str] = None, window: int = Query(50, ge=1, le=500)):
+    """P6 管道监控: 最近 N 次每层耗时聚合 (avg/min/max/p95/p99)"""
+    try:
+        from data_stream.pipeline_monitor import PipelineMonitor
+        if layer:
+            stats = PipelineMonitor.get_layer_stats(layer, symbol=symbol, window=window)
+            return {"layer": layer, "symbol": symbol, "window": window, "stats": stats}
+        # 全层摘要
+        layers = ['layer1_filter', 'layer2_gex', 'layer3_resonance', 'layer4_signal', 'layer5_llm']
+        return {
+            "layers": [
+                {"layer": l, "stats": PipelineMonitor.get_layer_stats(l, symbol=symbol, window=window)}
+                for l in layers
+            ],
+            "window": window,
+        }
+    except Exception as e:
+        logger.warning(f"pipeline_stats 失败: {e}")
+        return {"layers": [], "window": window, "error": str(e)}
+
+
+@app.get("/api/internal/pipeline/recent")
+async def pipeline_recent(layer: Optional[str] = None, symbol: Optional[str] = None, limit: int = Query(50, ge=1, le=500)):
+    """P6 管道监控: 最近 N 条原始指标"""
+    try:
+        from data_stream.pipeline_monitor import PipelineMonitor
+        return {
+            "metrics": PipelineMonitor.get_recent_metrics(layer_name=layer, symbol=symbol, limit=limit),
+            "count": len(PipelineMonitor.get_recent_metrics(layer_name=layer, symbol=symbol, limit=limit)),
+        }
+    except Exception as e:
+        logger.warning(f"pipeline_recent 失败: {e}")
+        return {"metrics": [], "count": 0, "error": str(e)}
+
+
+@app.get("/api/internal/clickhouse/health")
+async def clickhouse_health():
+    """P4 ClickHouse 连接状态 + 降级模式"""
+    try:
+        from database.clickhouse_client import get_client
+        client = get_client()
+        health = client.health_check()
+        return {
+            "available": True,
+            "connected": client.is_connected(),
+            "degraded_mode": not client.is_connected(),
+            **health,
+        }
+    except Exception as e:
+        return {
+            "available": False,
+            "connected": False,
+            "degraded_mode": True,
+            "error": str(e),
+        }
+
+
+@app.get("/api/internal/clickhouse/aggregate")
+async def clickhouse_aggregate(symbol: Optional[str] = None, days: int = Query(30, ge=1, le=365)):
+    """P4 ClickHouse GEX 聚合查询 (降级时返回空)"""
+    try:
+        from database.clickhouse_client import get_client
+        from datetime import datetime, timedelta
+        client = get_client()
+        if not client.is_connected():
+            return {"rows": [], "degraded": True, "reason": "clickhouse not connected"}
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        df = client.query_gex_aggregate(symbol=symbol, start_date=start.isoformat(), end_date=end.isoformat())
+        return {"rows": df.to_dict('records'), "count": len(df), "degraded": False}
+    except Exception as e:
+        return {"rows": [], "degraded": True, "error": str(e)}
+
+
+@app.get("/api/internal/engine/info")
+async def engine_info():
+    """P3 fast-vollib / P2 SVI / P5 VEX-CHEX 引擎可用性摘要"""
+    info = {"timestamp": datetime.now().isoformat(), "engines": {}}
+
+    # P3 fast-vollib
+    try:
+        from quant_logic.fast_vollib_engine import get_backend_info
+        backend = get_backend_info()
+        active = backend.get('active_backend', 'unknown')
+        available_backends = [k for k, v in backend.items() if isinstance(v, bool) and v]
+        info["engines"]["fast_vollib"] = {
+            "available": bool(available_backends),
+            "backend": active,
+            "available_backends": available_backends,
+            "batch_capacity": "10k options <50ms (Numba/GPU)" if active in ('numba', 'torch_cuda') else "n/a",
+        }
+    except Exception as e:
+        info["engines"]["fast_vollib"] = {"available": False, "error": str(e)}
+
+    # P2 SVI
+    try:
+        from quant_logic.svi_calibrator import SVICalibrator
+        info["engines"]["svi"] = {
+            "available": True,
+            "calibrator": "SVICalibrator",
+            "params": ["a", "b", "rho", "m", "sigma"],
+        }
+    except Exception as e:
+        info["engines"]["svi"] = {"available": False, "error": str(e)}
+
+    # P5 VEX/CHEX
+    try:
+        from quant_logic.vex_calculator import VEXCalculator, CharmCalculator
+        info["engines"]["vex_chex"] = {
+            "available": True,
+            "calculators": ["VEXCalculator", "CharmCalculator (CHEX)"],
+            "metric": "VEX = dGamma/dSigma (Vanna exposure), CHEX = dVanna/dSigma (Charm exposure)",
+        }
+    except Exception as e:
+        info["engines"]["vex_chex"] = {"available": False, "error": str(e)}
+
+    return info
+
+
 # ==================== Cross-Asset & Resonance History ====================
 @app.get("/api/dashboard/cross-asset-heatmap")
 async def cross_asset_heatmap():
