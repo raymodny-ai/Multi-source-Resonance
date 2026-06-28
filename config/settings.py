@@ -252,6 +252,21 @@ class Config:
         HAWKES_SUBCRITICAL: float = 0.7  # 亚临界分支比(<0.7为安全区)
         HAWKES_CRITICAL: float = 0.9  # 临界分支比(0.7-0.9为警戒区)
         HAWKES_WINDOW_MINUTES: int = 60  # 时间窗口(分钟)
+
+        # ════════════════════════════════════════════
+        # 流动性门控阈值 (V2.5 P1 优化)
+        # ════════════════════════════════════════════
+        # OI 门控: 剔除 OI < threshold 的非活跃合约
+        # 生产值 500; 测试/历史回测可用环境变量覆盖
+        OI_GATE_THRESHOLD: int = int(os.getenv('OI_GATE_THRESHOLD', '500'))
+        # 相对价差门控: 剔除 Spread% > 10% 的合约
+        SPREAD_PCT_GATE_THRESHOLD: float = 10.0
+        # 绝对价差门控: 低价合约 (价格 < 1美元) 用绝对值
+        LOW_PRICE_THRESHOLD: float = 1.0
+        LOW_PRICE_ABS_SPREAD_GATE: float = 0.10
+        # 0DTE 保护: 0DTE 合约 OI 阈值放宽 (保留流动性)
+        ZERO_DTE_OI_GATE: int = 100
+        ZERO_DTE_DAYS: int = 0
     
     @classmethod
     def validate(cls) -> List[str]:

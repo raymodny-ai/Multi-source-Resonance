@@ -32,6 +32,11 @@ IV_VIOLATION_THRESHOLD = 0.02     # 同 strike Call/Put IV 偏差 > 2%
 IV_VIOLATION_RATIO = 0.05         # 违例行权价比例 > 5% 视为质量差
 MIN_PASS_SCORE = 0.5              # 综合分低于此值标记为 invalid
 
+# V2.5 P1: 流动性门控阈值
+LOW_LIQUIDITY_OI_THRESHOLD = 500      # OI < 500 视为低流动性
+LOW_LIQUIDITY_SPREAD_PCT = 0.10       # Spread% > 10% 视为流动性差
+HIGH_LOW_LIQUIDITY_RATIO = 0.50       # 低流动性合约占比超过 50% 扣分
+
 # yfinance 期权链质量可靠的子集 (CBOE 完整镜像)
 YF_BENCHMARK_SYMBOLS = frozenset({
     'SPY', 'QQQ', 'IWM', 'GLD', 'SLV', 'TSLA', 'NVDA',
@@ -89,6 +94,7 @@ class GEXDataQualityValidator:
             'iv_violations': 0,
             'strike_density': len(strikes),
             'zero_oi_pct': 0.0,
+            'low_liquidity_pct': 0.0,    # V2.5 P1: 低流动性合约占比
             'issues': [],
         }
 
@@ -114,6 +120,18 @@ class GEXDataQualityValidator:
             if result['zero_oi_pct'] > HIGH_ZERO_OI_RATIO:
                 result['issues'].append(f'zero_oi_{zero_oi}/{len(strikes)}')
                 result['score'] -= 0.2
+
+            # V2.5 P1: 低流动性合约占比 (OI<500 或 Spread%>10%)
+            low_liq = sum(
+                1 for s in strikes
+                if self._is_low_liquidity(s)
+            )
+            result['low_liquidity_pct'] = low_liq / len(strikes)
+            if result['low_liquidity_pct'] > HIGH_LOW_LIQUIDITY_RATIO:
+                result['issues'].append(
+                    f'low_liquidity_{low_liq}/{len(strikes)}'
+                )
+                result['score'] -= 0.15
 
         if not spot:
             result['issues'].append('no_spot')
@@ -199,6 +217,29 @@ class GEXDataQualityValidator:
                 })
         return violations
 
+    def _is_low_liquidity(self, strike_data: Dict[str, Any]) -> bool:
+        """V2.5 P1: 判断单个 strike 是否低流动性
+
+        低流动性定义 (任一满足):
+          - OI < 500 (call_oi + put_oi 合计)
+          - Spread% > 10% (call 或 put 至少一侧)
+        """
+        call_oi = strike_data.get('call_oi', 0) or 0
+        put_oi = strike_data.get('put_oi', 0) or 0
+        total_oi = call_oi + put_oi
+        if total_oi < LOW_LIQUIDITY_OI_THRESHOLD:
+            return True
+
+        # 检查买卖价差 (尝试多种字段名)
+        for prefix in ('call', 'put'):
+            bid = strike_data.get(f'{prefix}_bid', 0) or 0
+            ask = strike_data.get(f'{prefix}_ask', 0) or 0
+            if ask > 0:
+                spread_pct = (ask - bid) / ask
+                if spread_pct > LOW_LIQUIDITY_SPREAD_PCT:
+                    return True
+        return False
+
 
 # ── 便捷函数:在 fetcher 抓完后立即调 ──
 def validate_after_fetch(symbol: str, gex_snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -229,5 +270,6 @@ def validate_after_fetch(symbol: str, gex_snapshot: Dict[str, Any]) -> Dict[str,
             'iv_violations': 0,
             'strike_density': 0,
             'zero_oi_pct': 0.0,
+            'low_liquidity_pct': 0.0,   # V2.5 P1
             'issues': ['validator_error'],
         }

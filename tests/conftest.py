@@ -1,7 +1,11 @@
 """pytest 共享 fixtures"""
+import os
 import pytest
 from pathlib import Path
 import sys
+
+# V2.5 P1: 在测试环境中放宽 OI 门控, 兼容历史测试数据
+os.environ.setdefault('OI_GATE_THRESHOLD', '100')
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).parent.parent))

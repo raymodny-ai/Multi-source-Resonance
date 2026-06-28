@@ -349,6 +349,70 @@ class VectorizedBSEngine:
         prices[np.isnan(prices) | np.isinf(prices)] = 0.0
         return prices
 
+    # ═══════════════════════════════════════════
+    # V2.5 P2: SVI 平滑集成
+    # ═══════════════════════════════════════════
+
+    def compute_gamma_with_svi_smoothing(
+        self,
+        S: np.ndarray,
+        K: np.ndarray,
+        T: np.ndarray,
+        svi_fits: Dict[int, Dict[str, float]],
+        spot: float,
+        risk_free_rate: Optional[float] = None,
+        option_types: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """使用 SVI 拟合的 IV 计算 Gamma (消除锯齿噪声)
+
+        Args:
+            S: 标的价格 (标量或数组)
+            K: 行权价数组
+            T: 到期时间数组 (年)
+            svi_fits: {dte_days: {a, b, rho, m, sigma}, ...}
+            spot: 标的价格
+            risk_free_rate: 无风险利率, 默认用 self.r
+            option_types: 期权类型数组 ('C'/'P'), 用于 Vanna 计算. 可选.
+        Returns:
+            gamma_array: 平滑后的 Gamma
+        """
+        from quant_logic.svi_calibrator import SVISurfaceCalibrator
+        r = risk_free_rate if risk_free_rate is not None else self.r
+
+        # 构造临时的 SurfaceCalibrator 用现有 fits
+        sc = SVISurfaceCalibrator(enforce_no_arbitrage=False)
+        sc.fits = svi_fits
+        sc.single_cal = SVICalibrator(enforce_no_arbitrage=False)
+
+        if S.size == 1:
+            S = np.full_like(K, S.item())
+
+        # 重新采样 IV
+        n = len(K)
+        sigma_smooth = np.full(n, 0.2, dtype=float)
+        for i in range(n):
+            T_val = float(T[i]) if T.ndim > 0 else float(T)
+            dte = int(round(T_val * 365))
+            if dte in svi_fits:
+                params = svi_fits[dte]
+                T_t = T_val
+                forward = spot * np.exp(r * T_t)
+                try:
+                    iv_smooth = sc.single_cal.iv_surface(
+                        np.array([float(K[i])]), forward, T_t, params
+                    )[0]
+                    if np.isfinite(iv_smooth) and iv_smooth > 0:
+                        sigma_smooth[i] = iv_smooth
+                except Exception as e:
+                    logger.debug(f"SVI smooth failed for K={K[i]}: {e}")
+                    sigma_smooth[i] = 0.2
+
+        # 使用平滑后的 IV 计算 Gamma
+        if option_types is None:
+            option_types = np.array(['C'] * n)
+        greeks = self.compute_all_greeks(S, K, sigma_smooth, T, option_types)
+        return greeks.gamma
+
 
 # ──────────────────────────────────────────────
 # 便捷函数

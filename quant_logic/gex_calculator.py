@@ -52,6 +52,144 @@ class GEXCalculator:
         """初始化 GEX 计算引擎 (V2.0: 懒加载向量化 BS 引擎)"""
         self._bs_engine = None
 
+    # ═══════════════════════════════════════════
+    # V2.5 P1 优化: 双重流动性门控
+    # ═══════════════════════════════════════════
+
+    @staticmethod
+    def apply_liquidity_gate(
+        option_chain_df: pd.DataFrame,
+        oi_threshold: Optional[int] = None,
+        spread_pct_threshold: Optional[float] = None,
+        low_price_threshold: Optional[float] = None,
+        low_price_abs_spread: Optional[float] = None,
+    ) -> Tuple[pd.DataFrame, Dict[str, int]]:
+        """V2.5 双重流动性门控
+
+        隔离做市商宽幅挂单导致的"僵尸报价"污染。
+        三道过滤:
+          1) OI 门控: 剔除 OI < 500 的非活跃合约
+          2) 相对价差门控: 剔除 Spread% > 10% 的合约
+          3) 低价合约绝对价差门控: 价格 < 1美元 且 Ask-Bid > 0.10
+
+        Args:
+            option_chain_df: 期权链 DataFrame, 必含 open_interest, bid, ask
+            oi_threshold: OI 阈值, 默认从 Config.Thresholds.OI_GATE_THRESHOLD
+            spread_pct_threshold: Spread% 阈值, 默认 10.0
+            low_price_threshold: 低价阈值, 默认 1.0
+            low_price_abs_spread: 绝对价差阈值, 默认 0.10
+
+        Returns:
+            (filtered_df, stats_dict):
+              - filtered_df: 通过门控的合约
+              - stats_dict: {原始/过滤后/被剔除数, 各阶段剔除数}
+        """
+        if option_chain_df.empty:
+            return option_chain_df.copy(), {
+                'original_count': 0, 'kept_count': 0, 'removed_count': 0,
+                'removed_oi': 0, 'removed_spread': 0, 'removed_low_price_spread': 0,
+            }
+
+        # 读取默认阈值
+        oi_thr = oi_threshold if oi_threshold is not None else Config.Thresholds.OI_GATE_THRESHOLD
+        sp_thr = spread_pct_threshold if spread_pct_threshold is not None else Config.Thresholds.SPREAD_PCT_GATE_THRESHOLD
+        lp_thr = low_price_threshold if low_price_threshold is not None else Config.Thresholds.LOW_PRICE_THRESHOLD
+        lp_abs = low_price_abs_spread if low_price_abs_spread is not None else Config.Thresholds.LOW_PRICE_ABS_SPREAD_GATE
+
+        original_count = len(option_chain_df)
+        df = option_chain_df.copy()
+
+        # 准备 spread 字段 (V2.5 P1: 容错处理, 缺列时仅 OI 门控)
+        has_spread_data = 'ask' in df.columns and 'bid' in df.columns
+        if has_spread_data:
+            if 'spread' not in df.columns:
+                df['spread'] = (df['ask'] - df['bid']).clip(lower=0.0)
+            if 'mid_price' not in df.columns:
+                df['mid_price'] = (df['ask'] + df['bid']) / 2.0
+            if 'spread_pct' not in df.columns:
+                df['spread_pct'] = np.where(
+                    df['ask'] > 0,
+                    df['spread'] / df['ask'] * 100.0,
+                    np.nan,
+                )
+
+        # ── 阶段 1: OI 门控 (总是执行) ──
+        oi_mask = df['open_interest'] >= oi_thr
+        removed_oi_count = int((~oi_mask).sum())
+
+        df = df[oi_mask].copy()
+
+        # ── 阶段 2: 价差门控 (仅当有 bid/ask 数据) ──
+        if has_spread_data and len(df) > 0:
+            # 中价 >= 1美元:  使用百分比阈值
+            normal_mask = (df['mid_price'] >= lp_thr) & (df['spread_pct'] <= sp_thr)
+            # 低价合约: 使用绝对价差阈值
+            low_price_mask = (df['mid_price'] < lp_thr) & (df['spread'] <= lp_abs)
+            spread_mask = normal_mask | low_price_mask
+
+            removed_spread = int((~spread_mask).sum())
+            low_price_high_spread = int(
+                ((df['mid_price'] < lp_thr) & (df['spread'] > lp_abs)).sum()
+            )
+            normal_high_spread = removed_spread - low_price_high_spread
+
+            df = df[spread_mask].copy()
+        else:
+            # 无 bid/ask 数据: 跳过价差门控
+            normal_high_spread = 0
+            low_price_high_spread = 0
+
+        kept_count = len(df)
+        stats = {
+            'original_count': original_count,
+            'kept_count': kept_count,
+            'removed_count': original_count - kept_count,
+            'removed_oi': removed_oi_count,
+            'removed_spread': normal_high_spread,
+            'removed_low_price_spread': low_price_high_spread,
+            'oi_threshold': oi_thr,
+            'spread_pct_threshold': sp_thr if has_spread_data else None,
+            'low_price_threshold': lp_thr if has_spread_data else None,
+            'low_price_abs_spread': lp_abs if has_spread_data else None,
+            'has_spread_data': has_spread_data,
+        }
+
+        removal_pct = (original_count - kept_count) / original_count * 100 if original_count > 0 else 0
+        spread_info = (
+            f", 价差 -{normal_high_spread}, 低价绝对价差 -{low_price_high_spread}"
+            if has_spread_data else " (无 bid/ask 数据, 跳过价差门控)"
+        )
+        logger.info(
+            f"[流动性门控] 原始 {original_count} → 保留 {kept_count} "
+            f"(剔除 {original_count - kept_count}, {removal_pct:.1f}%); "
+            f"OI 门控 -{removed_oi_count}{spread_info}"
+        )
+        return df, stats
+
+    def apply_zero_dte_protection(
+        self,
+        option_chain_df: pd.DataFrame,
+        zero_dte_oi_threshold: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """V2.5 0DTE 流动性保护
+
+        0DTE 期权流动性虽低, 但对盘中 Flip 判定极重要, 放宽 OI 阈值。
+        """
+        if option_chain_df.empty or 'days_to_expiry' not in option_chain_df.columns:
+            return option_chain_df
+
+        zero_dte_thr = (
+            zero_dte_oi_threshold if zero_dte_oi_threshold is not None
+            else Config.Thresholds.ZERO_DTE_OI_GATE
+        )
+        zero_dte_days = Config.Thresholds.ZERO_DTE_DAYS
+
+        df = option_chain_df.copy()
+        is_zero_dte = df['days_to_expiry'] <= zero_dte_days
+        # 0DTE 用更宽松的 OI 阈值
+        relaxed_oi_mask = (df['open_interest'] >= zero_dte_thr) | (~is_zero_dte)
+        return df[relaxed_oi_mask].copy()
+
     @property
     def bs_engine(self):
         """懒加载向量化 BS 引擎"""
@@ -551,7 +689,15 @@ class GEXCalculator:
             return self._empty_gex_result()
 
         df = option_chain_df.copy()
-        df = df[df['open_interest'] > 0]
+
+        # V2.5 P1 优化: 双重流动性门控 (OI + Spread%)
+        # 隔离做市商宽幅挂单导致的"僵尸报价"污染
+        df, _gate_stats = self.apply_liquidity_gate(df)
+        if df.empty:
+            return self._empty_gex_result()
+
+        # V2.5 P1 优化: 0DTE 流动性保护 (放宽 OI 阈值)
+        df = self.apply_zero_dte_protection(df)
         if df.empty:
             return self._empty_gex_result()
 
@@ -665,6 +811,96 @@ class GEXCalculator:
             'net_gex_values': net_gex_values,
             'current_spot': spot_price,
             'current_net_gex': current_result['net_gex'],
+        }
+
+    def calculate_gex_profile_fast(
+        self,
+        option_chain_df: pd.DataFrame,
+        spot_price: float,
+        price_range_pct: float = 0.10,
+        num_steps: int = 100,
+        symbol: Optional[str] = None,
+        prefer_gpu: bool = True,
+    ) -> Dict[str, any]:
+        """V2.5 P3: fast-vollib 加速版 GEX Profile 扫描
+
+        2D Gamma 网格一次计算所有价格点 × 所有行权价的 Gamma,
+        避免循环调用 BS 引擎的 Python overhead。
+
+        Args:
+            option_chain_df: 期权链 DataFrame
+            spot_price: 当前标的价格
+            price_range_pct: 价格扫描范围
+            num_steps: 扫描步数 (默认 100, 较默认 40 步加密)
+            symbol: 标的代码
+            prefer_gpu: 是否优先 GPU 后端
+        Returns:
+            同 calculate_gex_profile, 增加 'backend' 字段
+        """
+        try:
+            from quant_logic.fast_vollib_engine import FastVollibEngine
+        except ImportError:
+            logger.warning("fast_vollib_engine 不可用, 降级到 calculate_gex_profile")
+            return self.calculate_gex_profile(
+                option_chain_df, spot_price, price_range_pct, num_steps, symbol
+            )
+
+        # 应用流动性门控 (与 calculate_gex_profile 行为一致)
+        df, _ = self.apply_liquidity_gate(option_chain_df)
+        if df.empty:
+            return {
+                'spot_prices': [],
+                'net_gex_values': [],
+                'current_spot': spot_price,
+                'current_net_gex': 0.0,
+                'backend': 'none',
+            }
+
+        # 准备数据
+        strikes = df['strike'].to_numpy(dtype=float)
+        vols = df.get('implied_volatility', pd.Series(0.2, index=df.index)).to_numpy(dtype=float)
+        T = (df.get('days_to_expiry', pd.Series(30, index=df.index)) / 365.0).to_numpy(dtype=float)
+        oi = df['open_interest'].to_numpy(dtype=float)
+        option_types = df['type'].to_numpy()
+
+        # 价格网格
+        low = spot_price * (1 - price_range_pct)
+        high = spot_price * (1 + price_range_pct)
+        S_grid = np.linspace(low, high, num_steps)
+
+        # 2D Gamma 计算
+        engine = FastVollibEngine(prefer_gpu=prefer_gpu, risk_free_rate=self.RISK_FREE_RATE)
+        gamma_grid = engine.compute_gamma_grid_2d(S_grid, strikes, vols, T)
+        # gamma_grid shape: (num_steps, n_strikes)
+
+        # GEX 计算: gamma * multiplier * OI * S^2
+        # 广播: (n_steps, 1) × (1, n_strikes)
+        multiplier = self.CONTRACT_MULTIPLIER
+        oi_row = oi[None, :]
+        S_col = S_grid[:, None]
+        gex_grid = gamma_grid * multiplier * oi_row * S_col ** 2
+        gex_grid = np.where(np.isfinite(gex_grid), gex_grid, 0.0)
+
+        # Call / Put 分离
+        is_call = np.array([t.upper() == 'CALL' for t in option_types])
+        call_mask = is_call[None, :]
+        put_mask = ~is_call
+        put_mask_b = put_mask[None, :]
+
+        call_gex_per_step = gex_grid * call_mask  # put 部分置 0
+        put_gex_per_step = gex_grid * put_mask_b
+        net_gex_values = np.sum(call_gex_per_step, axis=1) - np.sum(put_gex_per_step, axis=1)
+
+        # 当前 spot 处的 GEX
+        idx = np.argmin(np.abs(S_grid - spot_price))
+        current_net_gex = float(net_gex_values[idx])
+
+        return {
+            'spot_prices': S_grid.tolist(),
+            'net_gex_values': net_gex_values.tolist(),
+            'current_spot': spot_price,
+            'current_net_gex': current_net_gex,
+            'backend': engine.backend,
         }
 
     def calculate_gex_profile_adaptive(

@@ -24,12 +24,14 @@ def make_chain(spot: float, num_strikes: int = 60, dte: int = 30) -> pd.DataFram
     """合成一份以 spot 为中心、±10% 行权价、真实 OI 分布的期权链
     设计为: 高于 spot 的 call OI 更大, 低于 spot 的 put OI 更大,
     → 当 spot 下跌时 net_gex 变负, 创造真正的翻转点
+
+    V2.5 P1: 提高 OI 基准至 500000, 确保最远 OTM strike OI ≥ 500
     """
     strikes = np.linspace(spot * 0.90, spot * 1.10, num_strikes)
     rows = []
     for s in strikes:
         moneyness = (s - spot) / spot
-        oi_intensity = 10000 * np.exp(-moneyness ** 2 / (2 * 0.03 ** 2))
+        oi_intensity = 500000 * np.exp(-moneyness ** 2 / (2 * 0.03 ** 2))
         iv = 0.20 + 0.15 * moneyness ** 2 / 0.01
         for opt_type in ('CALL', 'PUT'):
             # call OI 随 moneyness 递增 (做市商对冲 call 仓在价外), put 反之

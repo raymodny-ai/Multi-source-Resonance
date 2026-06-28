@@ -214,13 +214,19 @@ class GEXMetrixFetcher:
             return None
 
     @staticmethod
-    def parse_strikes(data: dict, min_oi: int = 100, multiplier: int = 100) -> List[Dict[str, Any]]:
+    def parse_strikes(
+        data: dict,
+        min_oi: Optional[int] = None,
+        multiplier: int = 100,
+        apply_liquidity_gate: bool = True,
+    ) -> List[Dict[str, Any]]:
         """B: 从 GEXMetrix 快照 options[] 提取逐 strike 真实 GEX/OI 分布
 
         Args:
             data: GEXMetrix API 返回的完整快照 (三层嵌套 data.data.data.options)
-            min_oi: 最小 OI 阈值,过滤深度虚值(默认 100)
+            min_oi: 最小 OI 阈值,过滤深度虚值 (默认 None → 使用 Config.Thresholds.OI_GATE_THRESHOLD=500)
             multiplier: 合约乘数 (SPY/QQQ/IWM=100, SPX 指数期权=100)
+            apply_liquidity_gate: V2.5 P1 - 是否应用双重流动性门控
 
         Returns:
             按 strike 聚合的列表: [{strike, call_gex, put_gex, call_oi, put_oi, call_vol, put_vol}, ...]
@@ -242,6 +248,10 @@ class GEXMetrixFetcher:
             if not options or not spot:
                 return []
 
+            # V2.5 P1: 使用 Config 阈值代替硬编码
+            if min_oi is None:
+                min_oi = Config.Thresholds.OI_GATE_THRESHOLD
+
             # 按 strike 聚合 (call/put 分别)
             agg: Dict[float, Dict[str, float]] = defaultdict(
                 lambda: {"call_gex": 0, "put_gex": 0, "call_oi": 0, "put_oi": 0, "call_vol": 0, "put_vol": 0}
@@ -259,11 +269,15 @@ class GEXMetrixFetcher:
                 oi = int(o.get("open_interest") or 0)
                 vol = int(o.get("volume") or 0)
 
-                # 过滤低 OI 合约
+                # V2.5 P1: 双重流动性门控 (OI 门控)
                 if oi < min_oi:
                     continue
                 # 过滤 gamma=0 的废数据
                 if gamma == 0:
+                    continue
+
+                # V2.5 P1: 额外对 volume 过滤 (零交易量僵尸合约)
+                if apply_liquidity_gate and vol == 0:
                     continue
 
                 # GEX = gamma * OI * multiplier * spot^2 * 0.01

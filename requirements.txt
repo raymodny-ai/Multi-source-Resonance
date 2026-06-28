@@ -21,6 +21,21 @@ scipy>=1.11.0
 # Vectorized Option Pricing (Layer 1 V2.0)
 py-vollib-vectorized>=0.1.1
 
+# ════════════════════════════════════════════
+# V2.5 P3: fast-vollib GPU/JIT 后端 (可选, 不可用时降级)
+# ════════════════════════════════════════════
+# fast-vollib>=0.2.0
+# torch>=2.0.0      # PyTorch CUDA 支持 (可选)
+# jax>=0.4.0        # JAX JIT 编译 (可选)
+# jaxlib>=0.4.0     # JAX 后端 (可选)
+# 安装 fast-vollib 后自动检测 GPU, 无 GPU 时降级到 Numba CPU
+
+# ════════════════════════════════════════════
+# V2.5 P2: SVI 无套利波动率曲面 (ssvi/svi-py 轻量级实现)
+# ════════════════════════════════════════════
+# 内部实现 (无需外部依赖, 见 quant_logic/svi_calibrator.py)
+# 依赖 scipy/numpy 已足
+
 # High-Performance Batch Processing (Layer 1 V2.0)
 polars>=0.20.0
 pyarrow>=14.0.0
