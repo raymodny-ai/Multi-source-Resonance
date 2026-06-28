@@ -79,7 +79,12 @@ test_reports/
 data/signal_state.json
 # GEXMetrix 运行时快照缓存 (每次 fetch_all 重新生成, 106MB, 不入仓)
 data/gexmetrix/
+# SqueezeMetrics 90 天 CSV 回填缓存 (2026-06-28 新增, 不入仓)
+data/squeezemetrics_snapshots/
 # 根目录散落的运行日志
 api_server.log
 *.log
 .qoder/
+
+# V2.6: 整个 data/ 目录不提交 (运行时采集数据, 已在上面覆盖具体子目录)
+# 注意: 不要提交 data/ 整体, 避免误传 100MB+ 缓存
