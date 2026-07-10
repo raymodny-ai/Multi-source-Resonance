@@ -1354,14 +1354,26 @@ class DatabaseManager:
         try:
             with self._get_cursor() as cursor:
                 if snapshot_id is None:
-                    # 找最新 snapshot
+                    # 找该 symbol 最新 **有 strike 数据** 的 snapshot
+                    # 防止 snapshot 入了但 strikes 写入失败时仍指向 0 条数据
                     cursor.execute(
-                        "SELECT id, timestamp, spot_price FROM gex_snapshots WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+                        """SELECT s.id, s.timestamp, s.spot_price
+                           FROM gex_snapshots s
+                           INNER JOIN gex_strikes st ON st.snapshot_id = s.id
+                           WHERE s.symbol = ?
+                           ORDER BY s.timestamp DESC LIMIT 1""",
                         (symbol.upper(),),
                     )
                     snap = cursor.fetchone()
                     if not snap:
-                        return []
+                        # 兜底：回退到无 strikes 的最新 snapshot
+                        cursor.execute(
+                            "SELECT id, timestamp, spot_price FROM gex_snapshots WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1",
+                            (symbol.upper(),),
+                        )
+                        snap = cursor.fetchone()
+                        if not snap:
+                            return []
                     snapshot_id = snap[0]
                     snap_ts = snap[1]
                     spot = snap[2]

@@ -8,7 +8,7 @@
     StreamEngine
       ├─ EventBus (全局 pub/sub)
       ├─ HyperliquidStream (WebSocket → crypto.funding_rate / crypto.open_interest)
-      ├─ RESTPollScheduler (每日 ET 20:00 批量采集 → gex/vix/axlfi/dbmf/crypto/short)
+      ├─ RESTPollScheduler (每日 ET 22:00 批量采集 → gex/vix/axlfi/dbmf/crypto/short)
       ├─ SignalPipeline (订阅 EventBus → 评分 → 告警)
       └─ 盘后任务 (短卖比 yfinance→FINRA 降级, 已并入每日批量)
 
@@ -39,7 +39,7 @@ class StreamEngine:
     RESTPollScheduler → SignalPipeline。替代 MainScheduler 的
     APScheduler 定时任务模型。
 
-    RESTPollScheduler 现为每日单次批量采集模式 (美东 20:00)，
+    RESTPollScheduler 现为每日单次批量采集模式 (美东 22:00)，
     不再进行盘中高频轮询。
 
     Attributes:
@@ -122,9 +122,9 @@ class StreamEngine:
         await self.signal_pipeline.start()
         logger.info("✓ SignalPipeline 已启动 (监听事件)")
 
-        # 3. 启动 REST 轮询调度器 (每日 ET 20:00 批量采集)
+        # 3. 启动 REST 轮询调度器 (每日 ET 22:00 批量采集)
         await self.rest_scheduler.start()
-        logger.info("✓ RESTPollScheduler 已启动 (每日美东 20:00 批量采集)")
+        logger.info("✓ RESTPollScheduler 已启动 (每日美东 22:00 批量采集)")
 
         # 4. 启动 Hyperliquid WebSocket 连接
         await self.hyperliquid_stream.start()

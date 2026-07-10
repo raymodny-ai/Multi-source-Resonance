@@ -24,6 +24,7 @@ import pytz
 
 from utils.logger import getLogger
 from data_stream.event_bus import EventBus, Topics
+from data_stream.pipeline_monitor import PipelineMonitor
 from database.db_manager import DatabaseManager
 from quant_logic import CryptoLeverageCleaner, VIXAnalyzer, DarkPoolVerifier
 from signal_engine import ResonanceScorer, SignalStateMachine
@@ -149,51 +150,53 @@ class SignalPipeline:
         """评估 Crypto 维度: 分析资金费率和OI, 写入DB"""
         try:
             loop = asyncio.get_event_loop()
-            funding_rate = self._crypto_cache['funding_rate']
-            current_oi = self._crypto_cache['oi']
+            with PipelineMonitor.layer('layer1_filter', 'BTC', 2) as mon_crypto:
+                funding_rate = self._crypto_cache['funding_rate']
+                current_oi = self._crypto_cache['oi']
 
-            # 获取历史OI (DB查询用 db_executor)
-            crypto_history = await loop.run_in_executor(
-                self._db_executor,
-                self._db.get_crypto_history,
-                1,
-            )
+                # 获取历史OI (DB查询用 db_executor)
+                crypto_history = await loop.run_in_executor(
+                    self._db_executor,
+                    self._db.get_crypto_history,
+                    1,
+                )
 
-            # CPU计算用 executor
-            historical_oi_list = (
-                crypto_history['btc_oi'].tolist()
-                if crypto_history is not None and len(crypto_history) > 0
-                else []
-            )
+                # CPU计算用 executor
+                historical_oi_list = (
+                    crypto_history['btc_oi'].tolist()
+                    if crypto_history is not None and len(crypto_history) > 0
+                    else []
+                )
 
-            oi_change = await loop.run_in_executor(
-                self._executor,
-                lambda: self._crypto_cleaner.detect_oi_crash(
-                    current_oi, historical_oi_list,
-                ),
-            )
+                oi_change = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self._crypto_cleaner.detect_oi_crash(
+                        current_oi, historical_oi_list,
+                    ),
+                )
 
-            funding_anomaly = await loop.run_in_executor(
-                self._executor,
-                self._crypto_cleaner.check_funding_rate_anomaly,
-                funding_rate,
-            )
+                funding_anomaly = await loop.run_in_executor(
+                    self._executor,
+                    self._crypto_cleaner.check_funding_rate_anomaly,
+                    funding_rate,
+                )
 
-            # 存入DB
-            timestamp = datetime.now(pytz.timezone('US/Eastern'))
-            await loop.run_in_executor(
-                self._db_executor,
-                self._db.insert_crypto_derivatives,
-                timestamp,
-                funding_rate,
-                current_oi,
-                oi_change['drop_percentage'],
-                False,  # liquidation_spike
-                None,   # cryptoquant_elr
-                funding_anomaly,
-                oi_change['crash_detected'],
-                False,  # leverage_cleanup
-            )
+                # 存入DB
+                timestamp = datetime.now(pytz.timezone('US/Eastern'))
+                await loop.run_in_executor(
+                    self._db_executor,
+                    self._db.insert_crypto_derivatives,
+                    timestamp,
+                    funding_rate,
+                    current_oi,
+                    oi_change['drop_percentage'],
+                    False,  # liquidation_spike
+                    None,   # cryptoquant_elr
+                    funding_anomaly,
+                    oi_change['crash_detected'],
+                    False,  # leverage_cleanup
+                )
+                mon_crypto.set_output(2)
 
             logger.info(
                 f"Crypto维度评分: funding={funding_rate*100:.4f}%, "
@@ -223,22 +226,24 @@ class SignalPipeline:
         """评估 GEX 维度: 写入DB"""
         try:
             loop = asyncio.get_event_loop()
-            gex_total = self._gex_cache.get('gex', 0.0)
-            dix_pct = self._gex_cache.get('dix', 0.0)
-            spx_price = self._gex_cache.get('price', 0.0)
+            with PipelineMonitor.layer('layer2_gex', 'SPY', 1) as mon:
+                gex_total = self._gex_cache.get('gex', 0.0)
+                dix_pct = self._gex_cache.get('dix', 0.0)
+                spx_price = self._gex_cache.get('price', 0.0)
 
-            timestamp = datetime.now(pytz.timezone('US/Eastern'))
-            await loop.run_in_executor(
-                self._db_executor,
-                self._db.insert_gex_record,
-                timestamp,
-                gex_total,   # gex_local
-                gex_total,   # gex_calibrated
-                1.0,         # alpha
-                0,           # put_wall
-                0,           # flip_zone_lower
-                0,           # flip_zone_upper
-            )
+                timestamp = datetime.now(pytz.timezone('US/Eastern'))
+                await loop.run_in_executor(
+                    self._db_executor,
+                    self._db.insert_gex_record,
+                    timestamp,
+                    gex_total,   # gex_local
+                    gex_total,   # gex_calibrated
+                    1.0,         # alpha
+                    0,           # put_wall
+                    0,           # flip_zone_lower
+                    0,           # flip_zone_upper
+                )
+                mon.set_output(1)
 
             logger.info(
                 f"GEX维度写入: SPX={spx_price:.0f}, "
@@ -268,34 +273,36 @@ class SignalPipeline:
         """评估 VIX 维度: 分析期限结构, 写入DB"""
         try:
             loop = asyncio.get_event_loop()
-            vix_spot = self._vix_cache.get('spot', 0.0)
-            vx1 = self._vix_cache.get('vx1', 0.0)
-            vx2 = self._vix_cache.get('vx2', 0.0)
+            with PipelineMonitor.layer('layer3_resonance', 'VIX', 1) as mon:
+                vix_spot = self._vix_cache.get('spot', 0.0)
+                vx1 = self._vix_cache.get('vx1', 0.0)
+                vx2 = self._vix_cache.get('vx2', 0.0)
 
-            # VIX分析计算
-            term_structure = await loop.run_in_executor(
-                self._executor,
-                self._vix_analyzer.analyze_term_structure,
-                vx1, vx2,
-            )
-            panic_premium = await loop.run_in_executor(
-                self._executor,
-                self._vix_analyzer.calculate_panic_premium,
-                vix_spot, vx1,
-            )
+                # VIX分析计算
+                term_structure = await loop.run_in_executor(
+                    self._executor,
+                    self._vix_analyzer.analyze_term_structure,
+                    vx1, vx2,
+                )
+                panic_premium = await loop.run_in_executor(
+                    self._executor,
+                    self._vix_analyzer.calculate_panic_premium,
+                    vix_spot, vx1,
+                )
 
-            timestamp = datetime.now(pytz.timezone('US/Eastern'))
-            await loop.run_in_executor(
-                self._db_executor,
-                self._db.insert_vix_analysis,
-                timestamp,
-                vix_spot,
-                vx1,
-                vx2,
-                term_structure['ratio'],
-                term_structure['state'],
-                panic_premium,
-            )
+                timestamp = datetime.now(pytz.timezone('US/Eastern'))
+                await loop.run_in_executor(
+                    self._db_executor,
+                    self._db.insert_vix_analysis,
+                    timestamp,
+                    vix_spot,
+                    vx1,
+                    vx2,
+                    term_structure['ratio'],
+                    term_structure['state'],
+                    panic_premium,
+                )
+                mon.set_output(1)
 
             logger.info(
                 f"VIX维度写入: ratio={term_structure['ratio']:.4f}, "
@@ -353,53 +360,55 @@ class SignalPipeline:
         """评估 Darkpool 维度: 提取信号, 写入DB"""
         try:
             loop = asyncio.get_event_loop()
-            axlfi_data = self._darkpool_cache.get('axlfi', {})
+            with PipelineMonitor.layer('layer1_filter', 'SPY', 5) as mon_dp:
+                axlfi_data = self._darkpool_cache.get('axlfi', {})
 
-            # 提取 AXLFI 子信号
-            dp_position_list = axlfi_data.get('dollar_dp_position', [])
-            close_prices = axlfi_data.get('close', [])
-            divergence = axlfi_data.get('divergence', False)
-            slope_20d = axlfi_data.get('slope_20d', 0.0)
-            slope_60d = axlfi_data.get('slope_60d', 0.0)
-            golden_cross = axlfi_data.get('golden_cross', False)
+                # 提取 AXLFI 子信号
+                dp_position_list = axlfi_data.get('dollar_dp_position', [])
+                close_prices = axlfi_data.get('close', [])
+                divergence = axlfi_data.get('divergence', False)
+                slope_20d = axlfi_data.get('slope_20d', 0.0)
+                slope_60d = axlfi_data.get('slope_60d', 0.0)
+                golden_cross = axlfi_data.get('golden_cross', False)
 
-            latest_dp = dp_position_list[-1] if dp_position_list else 0
-            short_pct_list = axlfi_data.get('short_volume_pct', [])
-            latest_short_pct = short_pct_list[-1] if short_pct_list else 0
+                latest_dp = dp_position_list[-1] if dp_position_list else 0
+                short_pct_list = axlfi_data.get('short_volume_pct', [])
+                latest_short_pct = short_pct_list[-1] if short_pct_list else 0
 
-            # 验证信号
-            confirmed_signal = await loop.run_in_executor(
-                self._executor,
-                lambda: self._darkpool_verifier.confirm_stockgrid_signal(
-                    divergence, slope_20d, slope_60d,
-                ),
-            )
+                # 验证信号
+                confirmed_signal = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self._darkpool_verifier.confirm_stockgrid_signal(
+                        divergence, slope_20d, slope_60d,
+                    ),
+                )
 
-            today = datetime.now(pytz.timezone('US/Eastern')).date()
-            short_ratio = self._darkpool_cache.get('short_ratio', 0.0)
-            dbmf_recovery = self._darkpool_cache.get('dbmf_recovery', False)
+                today = datetime.now(pytz.timezone('US/Eastern')).date()
+                short_ratio = self._darkpool_cache.get('short_ratio', 0.0)
+                dbmf_recovery = self._darkpool_cache.get('dbmf_recovery', False)
 
-            await loop.run_in_executor(
-                self._db_executor,
-                self._db.insert_dark_pool_metrics,
-                today,
-                latest_dp / 1e9 if latest_dp else 0,  # 转为十亿美元
-                short_ratio,
-                slope_20d,
-                slope_60d,
-                divergence,
-                dbmf_recovery,
-                False,  # dix_signal
-                short_ratio > 45.0,
-                confirmed_signal,
-                golden_cross,
-                # v2.1 暗盘EMA预处理字段
-                self._darkpool_preprocessed.get('latest_v_net'),
-                self._darkpool_preprocessed.get('latest_ema_fast'),
-                self._darkpool_preprocessed.get('latest_ema_slow'),
-                self._darkpool_preprocessed.get('zero_cross', {}).get('signal'),
-                self._darkpool_preprocessed.get('momentum_reversal', {}).get('signal'),
-            )
+                await loop.run_in_executor(
+                    self._db_executor,
+                    self._db.insert_dark_pool_metrics,
+                    today,
+                    latest_dp / 1e9 if latest_dp else 0,  # 转为十亿美元
+                    short_ratio,
+                    slope_20d,
+                    slope_60d,
+                    divergence,
+                    dbmf_recovery,
+                    False,  # dix_signal
+                    short_ratio > 45.0,
+                    confirmed_signal,
+                    golden_cross,
+                    # v2.1 暗盘EMA预处理字段
+                    self._darkpool_preprocessed.get('latest_v_net'),
+                    self._darkpool_preprocessed.get('latest_ema_fast'),
+                    self._darkpool_preprocessed.get('latest_ema_slow'),
+                    self._darkpool_preprocessed.get('zero_cross', {}).get('signal'),
+                    self._darkpool_preprocessed.get('momentum_reversal', {}).get('signal'),
+                )
+                mon_dp.set_output(5)
 
             logger.info(
                 f"Darkpool维度写入: AXLFI DP=${latest_dp:,.0f}, "
@@ -558,150 +567,150 @@ class SignalPipeline:
         """执行共振评分: 从DB读取最新数据 → 计算四维度分数 → 综合判定 → 告警"""
         try:
             loop = asyncio.get_event_loop()
+            with PipelineMonitor.layer('layer4_signal', 'SPY', 4) as mon:
+                # 从DB获取各维度最新数据
+                latest_gex = await loop.run_in_executor(
+                    self._db_executor, self._db.get_latest_gex,
+                )
+                latest_vix = await loop.run_in_executor(
+                    self._db_executor, self._db.get_latest_vix_analysis,
+                )
+                latest_crypto = await loop.run_in_executor(
+                    self._db_executor, self._db.get_latest_crypto_data,
+                )
+                latest_darkpool = await loop.run_in_executor(
+                    self._db_executor, self._db.get_latest_dark_pool_metrics,
+                )
 
-            # 从DB获取各维度最新数据
-            latest_gex = await loop.run_in_executor(
-                self._db_executor, self._db.get_latest_gex,
-            )
-            latest_vix = await loop.run_in_executor(
-                self._db_executor, self._db.get_latest_vix_analysis,
-            )
-            latest_crypto = await loop.run_in_executor(
-                self._db_executor, self._db.get_latest_crypto_data,
-            )
-            latest_darkpool = await loop.run_in_executor(
-                self._db_executor, self._db.get_latest_dark_pool_metrics,
-            )
+                if not latest_gex:
+                    logger.warning("GEX数据缺失，该维度记0分，继续部分评估")
+                    gex_score = {'score': 0.0, 'state': 'MISSING', 'details': 'GEX数据缺失'}
+                else:
+                    # 计算各维度分值 (CPU密集型 → executor)
+                    gex_score = await loop.run_in_executor(
+                        self._executor,
+                        lambda: self._resonance_scorer.calculate_gex_score(
+                            gex_local=latest_gex['gex_local'],
+                            gex_calibrated=latest_gex['gex_calibrated'],
+                            flip_zone_crossed=latest_gex['gex_calibrated'] > 0,
+                            gex_trend='IMPROVING',
+                        ),
+                    )
 
-            if not latest_gex:
-                logger.warning("GEX数据缺失，该维度记0分，继续部分评估")
-                gex_score = {'score': 0.0, 'state': 'MISSING', 'details': 'GEX数据缺失'}
-            else:
-                # 计算各维度分值 (CPU密集型 → executor)
-                gex_score = await loop.run_in_executor(
+                vix_score = await loop.run_in_executor(
                     self._executor,
-                    lambda: self._resonance_scorer.calculate_gex_score(
-                        gex_local=latest_gex['gex_local'],
-                        gex_calibrated=latest_gex['gex_calibrated'],
-                        flip_zone_crossed=latest_gex['gex_calibrated'] > 0,
-                        gex_trend='IMPROVING',
+                    lambda: self._resonance_scorer.calculate_vix_score(
+                        term_structure_ratio=(
+                            latest_vix.get('term_structure_ratio', 1.0)
+                            if latest_vix else 1.0
+                        ),
+                        slope_direction='DOWN',
+                        panic_premium=(
+                            latest_vix.get('panic_premium', 0.0)
+                            if latest_vix else 0.0
+                        ),
                     ),
                 )
 
-            vix_score = await loop.run_in_executor(
-                self._executor,
-                lambda: self._resonance_scorer.calculate_vix_score(
-                    term_structure_ratio=(
-                        latest_vix.get('term_structure_ratio', 1.0)
-                        if latest_vix else 1.0
+                crypto_score = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self._resonance_scorer.calculate_crypto_score(
+                        oi_crash=(
+                            latest_crypto.get('oi_crash', False)
+                            if latest_crypto else False
+                        ),
+                        funding_positive=(
+                            latest_crypto.get('btc_funding_rate', 0) >= 0
+                            if latest_crypto else False
+                        ),
+                        elr_safe=False,
+                        leverage_cleanup_confirmed=False,
                     ),
-                    slope_direction='DOWN',
-                    panic_premium=(
-                        latest_vix.get('panic_premium', 0.0)
-                        if latest_vix else 0.0
-                    ),
-                ),
-            )
-
-            crypto_score = await loop.run_in_executor(
-                self._executor,
-                lambda: self._resonance_scorer.calculate_crypto_score(
-                    oi_crash=(
-                        latest_crypto.get('oi_crash', False)
-                        if latest_crypto else False
-                    ),
-                    funding_positive=(
-                        latest_crypto.get('btc_funding_rate', 0) >= 0
-                        if latest_crypto else False
-                    ),
-                    elr_safe=False,
-                    leverage_cleanup_confirmed=False,
-                ),
-            )
-
-            # 暗盘评分 (支持降级) — 从适配器收集真实源状态
-            darkpool_source_status, darkpool_degradation_mode = \
-                self._collect_darkpool_source_status()
-
-            available_sources = {
-                'dix': darkpool_source_status.get('squeezemetrics', 'OK') in ('OK', 'DEGRADED_NETWORK'),
-                'short_ratio': True,  # yfinance/FINRA 始终可用
-                'stockgrid': darkpool_source_status.get('axlfi', 'OK') in ('OK', 'DEGRADED_NETWORK'),
-            }
-            darkpool_score = await loop.run_in_executor(
-                self._executor,
-                lambda: self._resonance_scorer.calculate_darkpool_score_with_fallback(
-                    dix_flag=(
-                        latest_darkpool.get('dix_signal', False)
-                        if latest_darkpool else False
-                    ),
-                    short_ratio_flag=(
-                        latest_darkpool.get('short_ratio_signal', False)
-                        if latest_darkpool else False
-                    ),
-                    stockgrid_flag=(
-                        latest_darkpool.get('stockgrid_signal', False)
-                        if latest_darkpool else False
-                    ),
-                    dbmf_recovery=(
-                        latest_darkpool.get('dbmf_ma5_recovery', False)
-                        if latest_darkpool else False
-                    ),
-                    available_sources=available_sources,
-                    
-                    preprocessed_bonus=self._resonance_scorer.compute_preprocessed_bonus(
-                        self._darkpool_preprocessed
-                    ),
-                ),
-            )
-
-            # 计算共振总分
-            resonance_result = await loop.run_in_executor(
-                self._executor,
-                lambda: self._resonance_scorer.calculate_total_score(
-                    gex_result=gex_score,
-                    vix_result=vix_score,
-                    crypto_result=crypto_score,
-                    darkpool_result=darkpool_score,
-                ),
-            )
-
-            # Hawkes Process
-            hawkes_result = await loop.run_in_executor(
-                self._executor,
-                lambda: self._resonance_scorer.estimate_hawkes_branching_ratio(
-                    recent_price_changes=[],
-                    recent_volumes=[],
-                ),
-            )
-
-            # 检查是否触发告警
-            trigger_result = await loop.run_in_executor(
-                self._executor,
-                self._signal_machine.check_and_trigger,
-                resonance_result,
-                current_time,
-            )
-
-            if trigger_result['should_alert']:
-                await self._send_alert(
-                    resonance_result, hawkes_result, current_time,
-                )
-            else:
-                logger.debug(
-                    f"共振评估完成: {resonance_result['total_score']}/"
-                    f"{resonance_result['max_score']}, {trigger_result['reason']}"
                 )
 
-            # 重置维度就绪标记, 等待下一轮数据
-            self._crypto_ready = False
-            self._gex_ready = False
-            self._vix_ready = False
-            self._darkpool_ready = False
+                # 暗盘评分 (支持降级) — 从适配器收集真实源状态
+                darkpool_source_status, darkpool_degradation_mode = \
+                    self._collect_darkpool_source_status()
+
+                available_sources = {
+                    'dix': darkpool_source_status.get('squeezemetrics', 'OK') in ('OK', 'DEGRADED_NETWORK'),
+                    'short_ratio': True,  # yfinance/FINRA 始终可用
+                    'stockgrid': darkpool_source_status.get('axlfi', 'OK') in ('OK', 'DEGRADED_NETWORK'),
+                }
+                darkpool_score = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self._resonance_scorer.calculate_darkpool_score_with_fallback(
+                        dix_flag=(
+                            latest_darkpool.get('dix_signal', False)
+                            if latest_darkpool else False
+                        ),
+                        short_ratio_flag=(
+                            latest_darkpool.get('short_ratio_signal', False)
+                            if latest_darkpool else False
+                        ),
+                        stockgrid_flag=(
+                            latest_darkpool.get('stockgrid_signal', False)
+                            if latest_darkpool else False
+                        ),
+                        dbmf_recovery=(
+                            latest_darkpool.get('dbmf_ma5_recovery', False)
+                            if latest_darkpool else False
+                        ),
+                        available_sources=available_sources,
+                        
+                        preprocessed_bonus=self._resonance_scorer.compute_preprocessed_bonus(
+                            self._darkpool_preprocessed
+                        ),
+                    ),
+                )
+
+                # 计算共振总分
+                resonance_result = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self._resonance_scorer.calculate_total_score(
+                        gex_result=gex_score,
+                        vix_result=vix_score,
+                        crypto_result=crypto_score,
+                        darkpool_result=darkpool_score,
+                    ),
+                )
+
+                # Hawkes Process
+                hawkes_result = await loop.run_in_executor(
+                    self._executor,
+                    lambda: self._resonance_scorer.estimate_hawkes_branching_ratio(
+                        recent_price_changes=[],
+                        recent_volumes=[],
+                    ),
+                )
+
+                # 检查是否触发告警
+                trigger_result = await loop.run_in_executor(
+                    self._executor,
+                    self._signal_machine.check_and_trigger,
+                    resonance_result,
+                    current_time,
+                )
+                mon.set_output(1)
+
+                if trigger_result['should_alert']:
+                    await self._send_alert(
+                        resonance_result, hawkes_result, current_time,
+                    )
+                else:
+                    logger.debug(
+                        f"共振评估完成: {resonance_result['total_score']}/"
+                        f"{resonance_result['max_score']}, {trigger_result['reason']}"
+                    )
+
+                # 重置维度就绪标记, 等待下一轮数据
+                self._crypto_ready = False
+                self._gex_ready = False
+                self._vix_ready = False
+                self._darkpool_ready = False
 
         except Exception as e:
             logger.error(f"共振评分失败: {e}", exc_info=True)
-
     async def _send_alert(
         self,
         resonance_result: Dict[str, Any],

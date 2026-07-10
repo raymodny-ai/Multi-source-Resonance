@@ -15,7 +15,12 @@ import CrossAssetHeatmap from '../components/CrossAssetHeatmap'
 import HistoricalTrend from '../components/HistoricalTrend'
 
 function HawkesProgressBar({ branchingRatio, state }: { branchingRatio: number; state: string }) {
-  const pct = Math.min((branchingRatio / 1.0) * 100, 100)
+  // ponymtail: inverted pct — 进度条表示“安全间距” = 1 - ρ
+  // (ρ 越高(超临界踩踏)→ 条越短(高危);
+  //  ρ 越低(亚临界衰竤)→ 条越长(安全间距足))
+  // 这样: 绿条越长 = 越安全; 红条底表示踩踏中。
+  const safetyPct = Math.min(Math.max((1 - branchingRatio) * 100, 0), 100)
+  const rawPct = Math.min(Math.max(branchingRatio * 100, 0), 100)
   const color = HAWKES_STATE_COLORS[state] ?? '#64748b'
   const label = HAWKES_STATE_LABELS[state] ?? state
   const isCritical = state === 'CRITICAL' || state === 'SUPERCRITICAL'
@@ -23,29 +28,35 @@ function HawkesProgressBar({ branchingRatio, state }: { branchingRatio: number; 
   return (
     <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4">
       <div className="flex items-center justify-between mb-2">
-        <h3 className="text-xs font-semibold text-[var(--text-primary)]">Hawkes 衰竭概率</h3>
+        <h3 className="text-xs font-semibold text-[var(--text-primary)]">
+          Hawkes 自激强度
+          <span className="text-[10px] text-[var(--text-secondary)] ml-1.5 font-normal">
+            (分支比越低 → 越接近衰竭)
+          </span>
+        </h3>
         <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ backgroundColor: `${color}20`, color }}>
           {label}
         </span>
       </div>
       <div className="relative h-2 bg-[var(--bg-primary)] rounded-full overflow-hidden mb-1">
+        {/* 填充 = 安全间距 (1 - ρ), 颜色仍取 state 色 */}
         <div
           className={`h-full rounded-full transition-all duration-700 ${isCritical ? 'animate-pulse' : ''}`}
-          style={{ width: `${pct}%`, backgroundColor: color }}
+          style={{ width: `${safetyPct}%`, backgroundColor: color }}
         />
-        {/* Critical threshold line at 0.7 */}
-        <div className="absolute top-0 bottom-0 w-px bg-[var(--accent-yellow)]" style={{ left: '70%' }} />
-        <div className="absolute top-0 bottom-0 w-px bg-[var(--accent-red)]" style={{ left: '90%' }} />
+        {/* 0.7 (safe edge) 反向在 30%, 0.9 在 10% */}
+        <div className="absolute top-0 bottom-0 w-px bg-[var(--accent-yellow)]" style={{ left: '30%' }} title="0.7 警戒" />
+        <div className="absolute top-0 bottom-0 w-px bg-[var(--accent-red)]" style={{ left: '10%' }} title="0.9 临界" />
       </div>
       <div className="flex justify-between text-[10px] text-[var(--text-secondary)]">
         <span>分支比: {branchingRatio.toFixed(2)}</span>
-        <span>{pct.toFixed(0)}%</span>
+        <span>安全间距 {safetyPct.toFixed(0)}% / 自激 {rawPct.toFixed(0)}%</span>
       </div>
       <div className="flex justify-between text-[9px] text-[var(--text-secondary)] mt-0.5">
-        <span style={{ color: 'var(--accent-green)' }}>0 安全区</span>
+        <span style={{ color: 'var(--accent-green)' }}>安全间距</span>
         <span style={{ color: 'var(--accent-yellow)' }}>0.7 警戒</span>
         <span style={{ color: 'var(--accent-red)' }}>0.9 临界</span>
-        <span>1.0 自激</span>
+        <span>踩踏中</span>
       </div>
     </div>
   )

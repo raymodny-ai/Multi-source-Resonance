@@ -188,18 +188,53 @@ async def recent_alerts(limit: int = Query(5)):
 @app.get("/api/gex/history")
 async def gex_history(days: int = Query(90)):
     rows = db.get_gex_history_days(days)
-    return [_gex_row(r) for r in rows]
+    snap_levels = _snapshot_levels_by_hour(db, days)
+    result = []
+    for r in rows:
+        row = _gex_row(r)
+        ts = row.get("timestamp", "")
+        # 跨所有实时区间不商仅设 None
+        if row.get("put_wall_level") is None:
+            ls = snap_levels.get(ts, {})
+            row["put_wall_level"] = ls.get("put_wall")
+            row["call_wall_level"] = ls.get("call_wall")
+            row["zero_gamma_level"] = ls.get("zero_gamma")
+        result.append(row)
+    return result
 
 
 @app.get("/api/dashboard/gex-curve")
 async def gex_curve(days: int = Query(30)):
-    """GEX 曲线数据: 含 Put Wall / Flip Zone 用于前端绘图"""
+    """GEX 曲线数据: 含 Put Wall / Flip Zone 用于前端绘图
+    ponytail: 接 gex_snapshots 补 call_wall/zero_gamma 到曲线 (SqueezeMetrics CSV 不提供)"""
     rows = db.get_gex_history_days(days)
     parsed = [_gex_row(r) for r in (rows or [])]
+    snap_levels = _snapshot_levels_by_hour(db, days)
+    # 在小时内找不到精确 match, 则 fallback 到 表中上一个有效 bucket
+    # (所以一个时间点上有现实的话, 最近一次 GEXMetrix snapshot 提供)
+    sorted_keys = sorted(snap_levels.keys(), reverse=True)
+    last_levels = None
+    # 补实期 put_wall/call_wall/zero_gamma (走 truncated hour bucket)
+    for p in parsed:
+        ts_raw = p.get("timestamp", "")
+        ts_trunc = ts_raw[:13] + ':00:00' if 'T' in ts_raw[:13] else None
+        if ts_trunc and (p.get("put_wall_level") or 0) <= 0:
+            # 三级 fallback: 精确 hour → 下一最近 hour → 传入 last_levels 缓存
+            ls = snap_levels.get(ts_trunc) or {}
+            if not ls:
+                for k in sorted_keys:
+                    if k < ts_trunc:
+                        ls = snap_levels[k]
+                        break
+            p["put_wall_level"] = ls.get("put_wall")
+            p["call_wall_level"] = ls.get("call_wall")
+            p["zero_gamma_level"] = ls.get("zero_gamma")
     return {
         "timestamps": [p["timestamp"] for p in parsed],
         "gex_calibrated": [p["gex_calibrated"] for p in parsed],
         "put_wall_level": [p["put_wall_level"] for p in parsed],
+        "call_wall_level": [p.get("call_wall_level") for p in parsed],
+        "zero_gamma_level": [p.get("zero_gamma_level") for p in parsed],
         "flip_zone_lower": [p["flip_zone_lower"] for p in parsed],
         "flip_zone_upper": [p["flip_zone_upper"] for p in parsed],
     }
@@ -1356,20 +1391,24 @@ def _build_dashboard_data():
     gex_wall = gex.get("put_wall_level", 0) or 0
     gex_flip_low = gex.get("flip_zone_lower", 0) or 0
     gex_flip_high = gex.get("flip_zone_upper", 0) or 0
+    gex_call_wall = 0
+    gex_spot = 0
     if gex_wall == 0 or gex_flip_low == 0 or gex_flip_high == 0:
         try:
             snap = db.get_gex_snapshot_latest('SPX')
             if snap:
                 if gex_wall == 0:
                     gex_wall = snap.get('put_wall') or 0
-                # 优先从 snapshot.zero_gamma_level 读真值 (GEXMetrix 提供)
+                if gex_call_wall == 0:
+                    gex_call_wall = snap.get('call_wall') or 0
+                gex_spot = snap.get('spot_price') or 0
+                # zero_gamma 为 dealer Gamma 标志性过零点 ± 兴阔[spot_x0.005, spot_x1.005]
+                # ponytail: v2.6 重写表说^ ₹均在 ±0.5% 仅决于货 spot 别期
                 zg = snap.get('zero_gamma_level') or 0
                 if gex_flip_low == 0 and zg:
                     gex_flip_low = zg
                 if gex_flip_high == 0 and zg:
-                    # ponytail: ±1% 启发式 (实盘典型 flip zone 宽度)
-                    # 后续 P2 alpha 校准后用 GEXCalculator.identify_flip_zone 真算
-                    gex_flip_high = zg * 1.01
+                    gex_flip_high = gex_flip_low * 1.005 if gex_flip_low else 0
         except Exception:
             pass
 
@@ -1389,13 +1428,39 @@ def _build_dashboard_data():
     else:
         level = "NO_SIGNAL"
 
+    # 动态生成 GEX 描述文育 (参考 put_wall / call_wall / spot 位置)
+    if gex_wall and gex_call_wall and gex_spot:
+        # spot 在 put_wall 和 call_wall 之间 → 区间震荡
+        if gex_wall < gex_spot < gex_call_wall:
+            # spot 偏 put_wall 側 → dealer 会 压 => 价格高补亝 "支持"
+            # spot 偏 call_wall 側 → dealer 会 控股 => 价格 拉爵
+            dist_pw = (gex_spot - gex_wall) / gex_spot * 100
+            dist_cw = (gex_call_wall - gex_spot) / gex_spot * 100
+            if dist_pw < 1:
+                desc = f"spot {gex_spot:.0f} 贴 put_wall {gex_wall:.0f} — near dealer support"
+            elif dist_cw < 1:
+                desc = f"spot {gex_spot:.0f} 贴 call_wall {gex_call_wall:.0f} — near dealer ceiling"
+            else:
+                desc = f"spot {gex_spot:.0f} 在 [{gex_wall:.0f} ↔ {gex_call_wall:.0f}] 区间内震荡"
+        elif gex_spot >= gex_call_wall:
+            desc = f"spot {gex_spot:.0f} 突破 call_wall {gex_call_wall:.0f} — dealer 控制转多头"
+        elif gex_spot <= gex_wall:
+            desc = f"spot {gex_spot:.0f} 击穿 put_wall {gex_wall:.0f} — dealer 起动 保护性"
+        else:
+            desc = f"spot {gex_spot:.0f} / put_wall {gex_wall:.0f} / call_wall {gex_call_wall:.0f}"
+    elif gex_wall or gex_call_wall:
+        desc = "GEX 价位区间仅部分可用"
+    else:
+        desc = "GEX 价位数据暂无"
+
     return {
         "timestamp": now,
         "resonance": {"total_score": total, "max_score": 5.0, "alert_level": level, "resonance_pct": resonance_pct},
         "dimensions": {
-            "gex": {"score": gex_score, "state": "NEUTRAL", "details": "GEX敞口正常",
+            "gex": {"score": gex_score, "state": "NEUTRAL", "details": desc,
                     "gex_local": gex.get("gex_local", 0), "gex_calibrated": gx,
                     "put_wall_level": gex_wall,
+                    "call_wall_level": gex_call_wall,
                     "flip_zone_lower": gex_flip_low,
                     "flip_zone_upper": gex_flip_high},
             "vix": {"score": vix_score, "state": "CONTANGO", "details": "期限结构正常",
@@ -1420,6 +1485,49 @@ def _build_dashboard_data():
         },
         "hawkes": {"branching_ratio": 0.5, "state": "SUBCRITICAL", "details": "Hawkes过程处于亚临界状态"},
     }
+
+
+def _snapshot_levels_by_hour(db_obj, days: int) -> dict:
+    """从 gex_snapshots 获取过去 `days` 天的 SPX 快照级别值:
+    {
+        '2026-07-10 14:00:00': {'put_wall': 7000.0, 'call_wall': 7600.0, 'zero_gamma': 7386.46},
+        ...
+    }
+    以 ISO 字符串 (YYYY-MM-DD HH:00:00) 为键
+    """
+    if db_obj is None:
+        return {}
+    out = {}
+    try:
+        # _get_cursor() 是 @contextmanager, 必须用 with 语句
+        with db_obj._get_cursor() as cur:
+            cur.execute("""
+                SELECT timestamp, put_wall, call_wall, zero_gamma_level
+                FROM gex_snapshots
+                WHERE symbol = 'SPX'
+                  AND put_wall IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 200
+            """)
+            rows = cur.fetchall()
+        for r in rows:
+            # r 是 sqlite3.Row 行, 使用索引访问
+            try:
+                ts, pw, cw, zg = r[0], r[1], r[2], r[3]
+            except (IndexError, TypeError):
+                continue
+            if not ts:
+                continue
+            ts_str = str(ts)[:13]
+            bucket = f"{ts_str}:00:00"
+            iso_bucket = ts_str.replace(' ', 'T') + ':00:00'
+            levels = {'put_wall': pw, 'call_wall': cw, 'zero_gamma': zg}
+            out[bucket] = levels
+            out[iso_bucket] = levels
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(f'_snapshot_levels_by_hour failed: {e}')
+    return out
 
 
 def _gex_row(r):

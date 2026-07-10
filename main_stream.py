@@ -2,7 +2,7 @@
 多源共振监控系统 - 入口文件 (每日定时批量采集模式)
 
 ⚠️ 盘中高频轮询已完全移除。系统现为每日单次批量采集模式：
-  每天美东 20:00 统一拉取全部 6 数据源 (GEX/DIX, VIX, AXLFI暗盘,
+  每天美东 22:00 统一拉取全部 6 数据源 (GEX/DIX, VIX, AXLFI暗盘,
   DBMF, 加密衍生品, 做空)，通过 EventBus 发布后由 SignalPipeline
   消费并触发共振评分和告警推送。
 
@@ -30,13 +30,13 @@ logger = getLogger('main_stream')
 def start():
     """启动每日定时批量采集 + WebSocket 实时流。
     
-    盘中高频轮询已移除，所有数据源统一在美东 20:00 批量拉取。
+    盘中高频轮询已移除，所有数据源统一在美东 22:00 批量拉取。
     Hyperliquid WebSocket 仍保持实时推送。
     """
     logger.info("=" * 54)
-    logger.info("  每日定时批量采集模式 (美东 20:00)")
+    logger.info("  每日定时批量采集模式 (美东 22:00)")
     logger.info("=" * 54)
-    logger.info("  盘中高频轮询已移除。数据采集统一到每日 20:00 ET。")
+    logger.info("  盘中高频轮询已移除。数据采集统一到每日 22:00 ET。")
     logger.info("  Hyperliquid WebSocket 实时流仍保持连接。")
     logger.info("")
     logger.info("  启动方式:")

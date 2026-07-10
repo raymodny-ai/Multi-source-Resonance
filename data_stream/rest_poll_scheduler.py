@@ -29,7 +29,7 @@ from config.settings import Config, DataFetchConfig
 logger = getLogger('rest_poll_scheduler')
 
 # 每日批量采集时间 (美东)
-DAILY_BATCH_HOUR = 20       # 每日美东 20:00 执行全量数据采集
+DAILY_BATCH_HOUR = 22       # 每日美东 22:00 执行全量数据采集
 DAILY_BATCH_MINUTE = 0
 DAILY_BATCH_INTERVAL_SECONDS = 86400  # 24 小时
 
@@ -102,7 +102,7 @@ class RESTPollScheduler:
     async def start(self) -> None:
         """启动每日定时批量采集任务 + GEXMetrix 盘中轮询
 
-        每天美东 20:00 执行一次全量数据采集 (7 数据源)。
+        每天美东 22:00 执行一次全量数据采集 (7 数据源)。
         GEXMetrix 独立盘中轮询 (盘中5min/盘后30min/盘前1h)。
         数据通过 EventBus 发布后，由 SignalPipeline 消费并触发共振评分。
         """
@@ -183,13 +183,13 @@ class RESTPollScheduler:
             return datetime.now().weekday() < 5
 
     # ================================================================
-    # 每日定时批量采集 (ET 20:00)
+    # 每日定时批量采集 (ET 22:00)
     # ================================================================
 
     async def _run_daily_batch_loop(self) -> None:
         """每日批量采集主循环
 
-        每天美东 20:00 执行一次 run_once_manual_collect()，
+        每天美东 22:00 执行一次 run_once_manual_collect()，
         将全部 7 数据源 (GEX/DIX, VIX, AXLFI暗盘, DBMF, 加密衍生品, 做空, GEXMetrix)
         的最新数据通过 EventBus 发布，由 SignalPipeline 消费。
         """
@@ -207,7 +207,7 @@ class RESTPollScheduler:
                     await asyncio.sleep(5)
                     continue
 
-                # 计算到下一个美东 20:00 的等待秒数
+                # 计算到下一个美东 22:00 的等待秒数
                 wait_seconds = self._seconds_until_next_batch()
 
                 if wait_seconds > 0:
@@ -263,7 +263,7 @@ class RESTPollScheduler:
                 await asyncio.sleep(300)  # 出错等5分钟后重试
 
     def _seconds_until_next_batch(self) -> float:
-        """计算距离下一个美东 20:00 的秒数
+        """计算距离下一个美东 22:00 的秒数
 
         Returns:
             float: 等待秒数 (0 表示应立即执行)
@@ -274,7 +274,7 @@ class RESTPollScheduler:
         eastern = pytz.timezone('US/Eastern')
         now_est = now_utc.astimezone(eastern)
 
-        # 构造今天的 20:00 ET
+        # 构造今天的 22:00 ET
         target = now_est.replace(
             hour=DAILY_BATCH_HOUR,
             minute=DAILY_BATCH_MINUTE,
@@ -283,7 +283,7 @@ class RESTPollScheduler:
         )
 
         if target <= now_est:
-            # 今天 20:00 已过，取明天 20:00
+            # 今天 22:00 已过，取明天 22:00
             target = target.replace(day=target.day + 1)
 
         delta = target - now_est
@@ -923,11 +923,16 @@ def db_insert_gex(snapshot: dict) -> None:
             # 拿到刚 insert 的 snapshot id
             latest = db.get_gex_snapshot_latest(snapshot.get("symbol", ""))
             if latest:
-                db.insert_gex_strikes(
-                    snapshot_id=latest["id"],
-                    symbol=snapshot.get("symbol", ""),
-                    timestamp=snapshot.get("timestamp", datetime.now().isoformat()),
-                    strikes=strikes,
-                )
+                try:
+                    inserted = db.insert_gex_strikes(
+                        snapshot_id=latest["id"],
+                        symbol=snapshot.get("symbol", ""),
+                        timestamp=snapshot.get("timestamp", datetime.now().isoformat()),
+                        strikes=strikes,
+                    )
+                    if not inserted:
+                        logger.warning(f"⚠️  GEX strikes 入库返空: {snapshot.get('symbol')} snap_id={latest['id']} (strikes 待写入={len(strikes)})")
+                except Exception as e_strikes:
+                    logger.error(f"❌  GEX strikes 入库失败: {snapshot.get('symbol')} snap_id={latest['id']} err={e_strikes}")
     except Exception as e:
         logger.error(f"数据库写入 GEX 快照失败: {e}")

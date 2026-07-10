@@ -414,32 +414,97 @@ class GEXMetrixFetcher:
 
         try:
             inner = data.get("data", data)
+            # ponytail: GEXMetrix snapshot 真实数据嵌在 data.data
+            # (外层 wrapper 是 {symbol, filename, uploaded, data:{...}}, 内层才是 {options:[...], current_price, ...})
+            if isinstance(inner, dict) and isinstance(inner.get("data"), dict):
+                inner = inner["data"]
 
             # 尝试多种常见字段名
             result["spot_price"] = (
                 inner.get("spot_price")
-                or inner.get("spotPrice")
+                or inner.get("current_price")
                 or inner.get("price")
                 or inner.get("underlying_price")
             )
+
+            # ── 从 strikes 数组计算关键汇总指标 ──
+            # GEXMetrix API 原始响应不返回 net_gex / call_wall / put_wall /
+            # zero_gamma_level 等预汇总字段,只给逐合约 options[]。需要
+            # 从本地 parse_strikes() 输出派生。
+            strikes = GEXMetrixFetcher.parse_strikes(data)
+            if strikes:
+                # Call Wall / Put Wall = |call_gex| / |put_gex| 最大的 strike
+                max_call_row = max(strikes, key=lambda s: abs(s.get("call_gex", 0)))
+                max_put_row = max(strikes, key=lambda s: abs(s.get("put_gex", 0)))
+                call_sum = sum(s.get("call_gex", 0) for s in strikes)
+                put_sum = sum(s.get("put_gex", 0) for s in strikes)
+                net_sum = sum(s.get("net_gex", 0) for s in strikes)
+
+                # 只在 API 顶层字段缺失时填充 (防止覆盖真实值)
+                if result.get("call_wall") is None:
+                    result["call_wall"] = max_call_row.get("strike")
+                if result.get("put_wall") is None:
+                    result["put_wall"] = max_put_row.get("strike")
+                if result.get("net_gex") is None:
+                    result["net_gex"] = round(net_sum, 2)
+                if result.get("call_gex") is None:
+                    result["call_gex"] = round(call_sum, 2)
+                if result.get("put_gex") is None:
+                    result["put_gex"] = round(put_sum, 2)
+                if result.get("total_gamma") is None:
+                    result["total_gamma"] = round(abs(call_sum) + abs(put_sum), 2)
+
+                # zero_gamma_level: dealer 净 Gamma 过零 strike
+                # 启发式 = OI 加权的 net_gex 调整后落在 spot 附近的 strike
+                # (GEX 包含: dealer 只使用净 Gamma,如果跨 strike 累加同号 → fallback 到 spot 附近 Gamma 符号反转折点的中心)
+                # ponytail: 金融定义 = 「净 Gamma ± 0 的 strike」 ≈ Γ_spot_vanilla 
+                # 更可靠的近似是用 OI-weighted vanna/gamma centroid 跨越 spot 的 strike
+                if result.get("zero_gamma_level") is None and strikes and result.get("spot_price"):
+                    spot = float(result["spot_price"])
+                    # 上面/下面各自 OI-weighted centroid
+                    above = [s for s in strikes if s["strike"] >= spot and s.get("net_gex", 0) > 0]
+                    below = [s for s in strikes if s["strike"] < spot and s.get("net_gex", 0) < 0]
+                    above_centroid = (
+                        sum(s["strike"] * s.get("net_gex", 0) for s in above)
+                        / sum(s.get("net_gex", 0) for s in above)
+                        if above and sum(s.get("net_gex", 0) for s in above) > 0
+                        else spot
+                    )
+                    below_centroid = (
+                        sum(s["strike"] * s.get("net_gex", 0) for s in below)
+                        / sum(s.get("net_gex", 0) for s in below)
+                        if below and sum(s.get("net_gex", 0) for s in below) < 0
+                        else spot
+                    )
+                    # OI-weighted avg (or spot fallback when 同侧)
+                    if above and below:
+                        result["zero_gamma_level"] = round(
+                            (above_centroid + below_centroid) / 2, 2
+                        )
+                    else:
+                        # fallback: spot × 1.0 (市场未分裂,处于决定性 Gamma 侧)
+                        result["zero_gamma_level"] = round(spot, 2)
 
             result["net_gex"] = (
                 inner.get("net_gex")
                 or inner.get("netGEX")
                 or inner.get("netGamma")
                 or inner.get("total_net_gex")
+                or result.get("net_gex")
             )
 
             result["call_gex"] = (
                 inner.get("call_gex")
                 or inner.get("callGEX")
                 or inner.get("total_call_gex")
+                or result.get("call_gex")
             )
 
             result["put_gex"] = (
                 inner.get("put_gex")
                 or inner.get("putGEX")
                 or inner.get("total_put_gex")
+                or result.get("put_gex")
             )
 
             result["zero_gamma_level"] = (
@@ -448,6 +513,7 @@ class GEXMetrixFetcher:
                 or inner.get("zero_gamma")
                 or inner.get("gamma_neutral")
                 or inner.get("flip_point")
+                or result.get("zero_gamma_level")
             )
 
             # Call Wall / Put Wall - 从 strikes 数组或顶层字段提取
@@ -455,54 +521,27 @@ class GEXMetrixFetcher:
                 inner.get("call_wall")
                 or inner.get("callWall")
                 or inner.get("resistance_level")
+                or result.get("call_wall")
             )
             result["put_wall"] = (
                 inner.get("put_wall")
                 or inner.get("putWall")
                 or inner.get("support_level")
+                or result.get("put_wall")
             )
-
-            # 如果顶层没有，尝试从 strikes 数组推断
-            if (result["call_wall"] is None or result["put_wall"] is None):
-                strikes = inner.get("strikes", []) or inner.get("levels", [])
-                if strikes:
-                    # 查找最大 call/put gamma 对应的行权价
-                    max_call_strike = None
-                    max_call_val = 0
-                    max_put_strike = None
-                    max_put_val = 0
-                    for s in strikes:
-                        if isinstance(s, dict):
-                            cg = s.get("call_gex") or s.get("callGEX") or s.get("gamma") or 0
-                            pg = s.get("put_gex") or s.get("putGEX") or 0
-                            strike = s.get("strike") or s.get("strike_price") or 0
-                            if cg is None and pg is None:
-                                continue
-                            if cg and abs(float(cg)) > max_call_val:
-                                max_call_val = abs(float(cg))
-                                max_call_strike = float(strike)
-                            if pg and abs(float(pg)) > max_put_val:
-                                max_put_val = abs(float(pg))
-                                max_put_strike = float(strike)
-                    if result["call_wall"] is None:
-                        result["call_wall"] = max_call_strike
-                    if result["put_wall"] is None:
-                        result["put_wall"] = max_put_strike
 
             # 如果 call_gex/put_gex 为空但 net_gex 有值，尝试从 strikes 汇总
             if result["call_gex"] is None or result["put_gex"] is None:
-                strikes = inner.get("strikes", []) or inner.get("levels", [])
                 if strikes:
                     call_sum = 0.0
                     put_sum = 0.0
                     for s in strikes:
-                        if isinstance(s, dict):
-                            cg = s.get("call_gex") or s.get("callGEX") or s.get("gamma") or 0
-                            pg = s.get("put_gex") or s.get("putGEX") or 0
-                            if cg:
-                                call_sum += float(cg)
-                            if pg:
-                                put_sum += float(pg)
+                        cg = s.get("call_gex") or s.get("callGEX") or s.get("gamma") or 0
+                        pg = s.get("put_gex") or s.get("putGEX") or 0
+                        if cg:
+                            call_sum += float(cg)
+                        if pg:
+                            put_sum += float(pg)
                     if result["call_gex"] is None and call_sum != 0:
                         result["call_gex"] = call_sum
                     if result["put_gex"] is None and put_sum != 0:
